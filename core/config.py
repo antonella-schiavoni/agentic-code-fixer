@@ -1,0 +1,247 @@
+"""Configuration management and validation for the Agentic Code Fixer system.
+
+This module provides comprehensive configuration handling for all components
+of the patch generation pipeline. It defines Pydantic models for type-safe
+configuration validation and supports both YAML and JSON configuration files.
+
+The configuration system is designed with sensible defaults while allowing
+fine-grained control over every aspect of the system's behavior, from agent
+parameters to evaluation methods and testing procedures.
+
+Key configuration areas include:
+- AI agent setup and specialization
+- Vector database and embedding configuration
+- Patch evaluation methodology
+- Test execution and validation
+- Logging and experiment tracking
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import yaml
+from pydantic import BaseModel, Field, field_validator
+
+from core.types import AgentConfig, EvaluationMethod
+
+
+class VectorDBConfig(BaseModel):
+    """Configuration for the vector database used in code indexing and retrieval.
+
+    This configuration controls how source code is processed, embedded, and
+    stored for semantic similarity search. The vector database enables efficient
+    retrieval of relevant code contexts based on problem descriptions.
+
+    Attributes:
+        provider: Vector database backend ('chromadb' is currently supported).
+        collection_name: Name of the collection to store code embeddings.
+        persist_directory: Local directory for persistent storage of the database.
+        embedding_model: HuggingFace model name for generating code embeddings.
+        chunk_size: Maximum characters per code chunk for embedding.
+        chunk_overlap: Number of overlapping characters between adjacent chunks.
+    """
+
+    provider: str = "chromadb"
+    collection_name: str = "code_embeddings"
+    persist_directory: str = "./data/vectordb"
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    chunk_size: int = 500
+    chunk_overlap: int = 50
+
+
+class OpenCodeConfig(BaseModel):
+    """Configuration for OpenCode SST integration and agent orchestration.
+
+    This configuration controls the integration with OpenCode SST framework
+    for managing multiple AI agents in parallel during patch generation.
+    OpenCode SST provides the infrastructure for coordinating autonomous
+    agents working on the same problem.
+
+    Attributes:
+        enabled: Whether to use OpenCode SST for agent orchestration.
+        base_url: Optional custom OpenCode SST service endpoint.
+        api_key: Optional API key for OpenCode SST authentication.
+        max_parallel_agents: Maximum number of agents to run simultaneously.
+        timeout_seconds: Maximum time allowed for patch generation per agent.
+    """
+
+    enabled: bool = True
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    max_parallel_agents: int = 4
+    timeout_seconds: int = 300
+
+
+class EvaluationConfig(BaseModel):
+    """Configuration for patch evaluation and ranking algorithms.
+
+    This configuration controls how patch candidates are compared and ranked
+    to determine the best solution. It supports both AB testing and ELO
+    tournament methods with customizable parameters for different evaluation
+    strategies.
+
+    Attributes:
+        method: Evaluation algorithm (AB_TESTING or ELO_TOURNAMENT).
+        model_name: Language model to use for patch comparisons.
+        temperature: Sampling temperature for evaluation consistency.
+        max_tokens: Maximum response length for evaluation reasoning.
+        elo_k_factor: K-factor for ELO rating updates (affects rating volatility).
+        min_comparisons_per_patch: Minimum comparisons needed per patch.
+        confidence_threshold: Minimum confidence required for evaluation results.
+    """
+
+    method: EvaluationMethod = EvaluationMethod.AB_TESTING
+    model_name: str = "claude-3-5-sonnet-20241022"
+    temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    max_tokens: int = 2048
+    elo_k_factor: int = 32
+    min_comparisons_per_patch: int = 3
+    confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+
+
+class TestingConfig(BaseModel):
+    """Configuration for testing patches."""
+
+    test_command: str = "pytest"
+    test_timeout_seconds: int = 300
+    pre_test_commands: List[str] = Field(default_factory=list)
+    post_test_commands: List[str] = Field(default_factory=list)
+    required_coverage: Optional[float] = None
+    fail_on_regression: bool = True
+
+
+class LoggingConfig(BaseModel):
+    """Configuration for logging and reporting."""
+
+    level: str = "INFO"
+    output_dir: str = "./experiments"
+    log_file: str = "agentic_code_fixer.log"
+    save_patches: bool = True
+    save_evaluations: bool = True
+    save_test_results: bool = True
+    console_output: bool = True
+
+
+class Config(BaseModel):
+    """Main configuration for Agentic Code Fixer."""
+
+    # Repository settings
+    repository_path: str = Field(description="Path to the target repository")
+    problem_description: str = Field(description="Description of the bug/issue to fix")
+    target_files: Optional[List[str]] = Field(
+        default=None, description="Specific files to focus on (optional)"
+    )
+    exclude_patterns: List[str] = Field(
+        default_factory=lambda: ["*.pyc", "__pycache__", ".git", "node_modules"]
+    )
+
+    # Agent configuration
+    agents: List[AgentConfig] = Field(description="List of agent configurations")
+    num_patch_candidates: int = Field(default=10, gt=0)
+
+    # Component configurations
+    vectordb: VectorDBConfig = Field(default_factory=VectorDBConfig)
+    opencode: OpenCodeConfig = Field(default_factory=OpenCodeConfig)
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+    testing: TestingConfig = Field(default_factory=TestingConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    # Claude API settings
+    claude_api_key: Optional[str] = None
+    claude_base_url: Optional[str] = None
+
+    @field_validator("repository_path")
+    @classmethod
+    def validate_repository_path(cls, v: str) -> str:
+        """Validate that repository path exists."""
+        path = Path(v)
+        if not path.exists():
+            raise ValueError(f"Repository path does not exist: {v}")
+        if not path.is_dir():
+            raise ValueError(f"Repository path is not a directory: {v}")
+        return str(path.resolve())
+
+    @field_validator("agents")
+    @classmethod
+    def validate_agents(cls, v: List[AgentConfig]) -> List[AgentConfig]:
+        """Validate that at least one agent is configured."""
+        if not v:
+            raise ValueError("At least one agent must be configured")
+        return v
+
+    def get_output_dir(self) -> Path:
+        """Get the output directory for this experiment."""
+        return Path(self.logging.output_dir)
+
+    def ensure_output_dir(self) -> None:
+        """Create output directory if it doesn't exist."""
+        self.get_output_dir().mkdir(parents=True, exist_ok=True)
+
+
+def load_config(config_path: str | Path) -> Config:
+    """Load configuration from YAML or JSON file."""
+    config_path = Path(config_path)
+
+    if not config_path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        if config_path.suffix.lower() in [".yaml", ".yml"]:
+            data = yaml.safe_load(f)
+        elif config_path.suffix.lower() == ".json":
+            data = json.load(f)
+        else:
+            raise ValueError(
+                f"Unsupported config file format: {config_path.suffix}. "
+                "Use .yaml, .yml, or .json"
+            )
+
+    return Config(**data)
+
+
+def create_default_config(
+    repository_path: str,
+    problem_description: str,
+    output_path: str | Path = "config.yaml",
+) -> Config:
+    """Create a default configuration file."""
+    default_agents = [
+        AgentConfig(
+            agent_id="general_fixer",
+            model_name="claude-3-5-sonnet-20241022",
+            temperature=0.7,
+            system_prompt="You are a skilled software engineer focused on fixing bugs.",
+            specialized_role="general",
+        ),
+        AgentConfig(
+            agent_id="security_expert",
+            model_name="claude-3-5-sonnet-20241022",
+            temperature=0.5,
+            system_prompt="You are a security expert focused on secure code fixes.",
+            specialized_role="security",
+        ),
+        AgentConfig(
+            agent_id="performance_optimizer",
+            model_name="claude-3-5-sonnet-20241022",
+            temperature=0.6,
+            system_prompt="You are a performance expert focused on efficient solutions.",
+            specialized_role="performance",
+        ),
+    ]
+
+    config = Config(
+        repository_path=repository_path,
+        problem_description=problem_description,
+        agents=default_agents,
+    )
+
+    # Save to file
+    output_path = Path(output_path)
+    with open(output_path, "w", encoding="utf-8") as f:
+        # Convert to dict and save as YAML
+        yaml.dump(config.model_dump(), f, default_flow_style=False, indent=2)
+
+    return config
