@@ -260,7 +260,7 @@ class AgentConfig(BaseModel):
     """
 
     agent_id: str
-    model_name: str = "claude-3-5-sonnet-20241022"
+    model_name: str
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=2048, gt=0)
     system_prompt: str = ""

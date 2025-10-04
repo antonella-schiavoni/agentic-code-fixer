@@ -24,35 +24,35 @@ num_patch_candidates: 15
 # Diverse agent configurations with specialized roles
 agents:
   - agent_id: "general_python_expert"
-    model_name: "claude-3-5-sonnet-20241022"
+    model_name: "claude-sonnet-4-5-20250929"
     temperature: 0.7
     max_tokens: 3072
     system_prompt: "You are an expert Python developer with deep knowledge of concurrency, threading, and data processing patterns."
     specialized_role: "general"
 
   - agent_id: "concurrency_specialist"
-    model_name: "claude-3-5-sonnet-20241022"
+    model_name: "claude-sonnet-4-5-20250929"
     temperature: 0.6
     max_tokens: 3072
     system_prompt: "You are a concurrency expert specializing in threading, async programming, and race condition fixes in Python."
     specialized_role: "concurrency"
 
   - agent_id: "security_auditor"
-    model_name: "claude-3-5-sonnet-20241022"
+    model_name: "claude-sonnet-4-5-20250929"
     temperature: 0.4
     max_tokens: 2048
     system_prompt: "You are a security expert focused on thread safety, data integrity, and secure concurrent programming practices."
     specialized_role: "security"
 
   - agent_id: "performance_engineer"
-    model_name: "claude-3-5-sonnet-20241022"
+    model_name: "claude-sonnet-4-5-20250929"
     temperature: 0.5
     max_tokens: 2048
     system_prompt: "You are a performance engineer focused on efficient concurrent algorithms and scalable solutions."
     specialized_role: "performance"
 
   - agent_id: "reliability_engineer"
-    model_name: "claude-3-5-sonnet-20241022"
+    model_name: "claude-sonnet-4-5-20250929"
     temperature: 0.3
     max_tokens: 2048
     system_prompt: "You are a reliability engineer focused on fault-tolerant systems, error handling, and robust concurrent code."
@@ -76,7 +76,7 @@ opencode:
 # ELO tournament evaluation for better patch ranking
 evaluation:
   method: "elo_tournament"
-  model_name: "claude-3-5-sonnet-20241022"
+  model_name: "claude-sonnet-4-5-20250929"
   temperature: 0.05  # Very low temperature for consistent evaluation
   max_tokens: 4096
   elo_k_factor: 24

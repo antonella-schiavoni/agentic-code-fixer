@@ -69,6 +69,7 @@ def run(
 def create_config(
     repository_path: str = typer.Argument(..., help="Path to target repository"),
     problem_description: str = typer.Argument(..., help="Description of the problem to fix"),
+    model_name: str = typer.Argument(..., help="Claude model name to use (e.g., claude-sonnet-4-5-20250929)"),
     output_path: str = typer.Option("config.yaml", help="Output path for config file"),
 ) -> None:
     """Generate a default configuration file with sensible defaults.
@@ -80,12 +81,14 @@ def create_config(
     Args:
         repository_path: Path to the target repository for automated fixing.
         problem_description: Human-readable description of the issue to address.
+        model_name: Claude model name to use for agents and evaluation.
         output_path: File path where the configuration should be saved.
     """
     try:
         config = create_default_config(
             repository_path=repository_path,
             problem_description=problem_description,
+            model_name=model_name,
             output_path=output_path,
         )
 

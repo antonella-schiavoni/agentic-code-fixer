@@ -94,7 +94,7 @@ class EvaluationConfig(BaseModel):
     """
 
     method: EvaluationMethod = EvaluationMethod.AB_TESTING
-    model_name: str = "claude-3-5-sonnet-20241022"
+    model_name: str
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     max_tokens: int = 2048
     elo_k_factor: int = 32
@@ -205,27 +205,38 @@ def load_config(config_path: str | Path) -> Config:
 def create_default_config(
     repository_path: str,
     problem_description: str,
+    model_name: str,
     output_path: str | Path = "config.yaml",
 ) -> Config:
-    """Create a default configuration file."""
+    """Create a default configuration file with the specified model name.
+
+    Args:
+        repository_path: Path to the target repository.
+        problem_description: Description of the problem to fix.
+        model_name: Claude model name to use for agents and evaluation.
+        output_path: Path where the configuration file should be saved.
+
+    Returns:
+        Config object with the specified parameters.
+    """
     default_agents = [
         AgentConfig(
             agent_id="general_fixer",
-            model_name="claude-3-5-sonnet-20241022",
+            model_name=model_name,
             temperature=0.7,
             system_prompt="You are a skilled software engineer focused on fixing bugs.",
             specialized_role="general",
         ),
         AgentConfig(
             agent_id="security_expert",
-            model_name="claude-3-5-sonnet-20241022",
+            model_name=model_name,
             temperature=0.5,
             system_prompt="You are a security expert focused on secure code fixes.",
             specialized_role="security",
         ),
         AgentConfig(
             agent_id="performance_optimizer",
-            model_name="claude-3-5-sonnet-20241022",
+            model_name=model_name,
             temperature=0.6,
             system_prompt="You are a performance expert focused on efficient solutions.",
             specialized_role="performance",
@@ -236,6 +247,7 @@ def create_default_config(
         repository_path=repository_path,
         problem_description=problem_description,
         agents=default_agents,
+        evaluation=EvaluationConfig(model_name=model_name),
     )
 
     # Save to file

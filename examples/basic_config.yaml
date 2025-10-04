@@ -20,21 +20,21 @@ num_patch_candidates: 8
 # Agent configurations
 agents:
   - agent_id: "general_fixer"
-    model_name: "claude-3-5-sonnet-20241022"
+    model_name: "claude-sonnet-4-5-20250929"
     temperature: 0.7
     max_tokens: 2048
     system_prompt: "You are a skilled Python developer focused on fixing bugs while maintaining code quality."
     specialized_role: "general"
 
   - agent_id: "security_expert"
-    model_name: "claude-3-5-sonnet-20241022"
+    model_name: "claude-sonnet-4-5-20250929"
     temperature: 0.5
     max_tokens: 2048
     system_prompt: "You are a security expert focused on secure coding practices and fixing security vulnerabilities."
     specialized_role: "security"
 
   - agent_id: "performance_optimizer"
-    model_name: "claude-3-5-sonnet-20241022"
+    model_name: "claude-sonnet-4-5-20250929"
     temperature: 0.6
     max_tokens: 2048
     system_prompt: "You are a performance expert focused on efficient solutions and optimization."
@@ -58,7 +58,7 @@ opencode:
 # Evaluation configuration
 evaluation:
   method: "ab_testing"  # or "elo_tournament"
-  model_name: "claude-3-5-sonnet-20241022"
+  model_name: "claude-sonnet-4-5-20250929"
   temperature: 0.1
   max_tokens: 2048
   elo_k_factor: 32
