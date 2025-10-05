@@ -159,6 +159,7 @@ class PatchApplicator:
                 self._run_command(cmd, repo_path)
 
             # Run main test command
+            #TODO: We might need an LLM call with MCP to understand how to run the tests.
             result = self._run_command(
                 self.config.test_command,
                 repo_path,
@@ -278,6 +279,8 @@ class PatchApplicator:
         Returns:
             Path to the created test environment directory.
         """
+        #TODO: This can be improved. Think about large repositories, monorepos, etc. Does it make sense to copy the entire repository? If it's a git repository, we might be able to use worktrees.
+        #TODO: What happens with the dependencies?
         repo_path = Path(repo_path)
 
         if temp_dir:

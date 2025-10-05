@@ -118,7 +118,7 @@ class CodeIndexer:
     def search_relevant_context(
         self,
         problem_description: str,
-        top_k: int = 10,
+        top_k: int = 10, #TODO: We may need to increase this number
         file_filter: Optional[str] = None,
     ) -> List[CodeContext]:
         """Search for code contexts relevant to a problem description."""
@@ -142,6 +142,7 @@ class CodeIndexer:
         target_files: Optional[List[str]] = None,
     ) -> List[Path]:
         """Find all code files in the repository."""
+        #TODO: Remove target_files, we should index the entire repository, not just specific files
         if target_files:
             # Use specific target files
             files = []
@@ -221,6 +222,7 @@ class CodeIndexer:
 
     def _detect_language(self, file_path: Path) -> str:
         """Detect programming language from file extension."""
+        #TODO: If required, we could use a library to detect the programming language in a more sophisticated way
         suffix = file_path.suffix.lower()
 
         for language, extensions in self.language_extensions.items():
@@ -283,6 +285,7 @@ class CodeIndexer:
         """Extract function names from code content."""
         functions = []
 
+        #TODO: Improve this 
         if language == "python":
             functions = self._extract_python_functions(content)
         elif language in ["javascript", "typescript"]:

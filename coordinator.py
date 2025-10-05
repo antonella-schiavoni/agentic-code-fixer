@@ -217,7 +217,7 @@ class AgenticCodeFixer:
         patches = await self.agent_orchestrator.generate_patches(
             problem_description=self.config.problem_description,
             code_indexer=self.code_indexer,
-            target_files=self.config.target_files,
+            target_files=self.config.target_files, #TODO: Remove target_files
         )
 
         # Store patches in patch manager
@@ -282,6 +282,7 @@ class AgenticCodeFixer:
             self.elo_ranker.initialize_patch_ratings(patches)
 
             # Generate evaluation results for ELO ranking
+            #TODO: Does it make sense to use the same evaluation method for ELO ranking?
             evaluation_results = await self.patch_evaluator.evaluate_patches_pairwise(
                 patches=patches,
                 problem_description=self.config.problem_description,
@@ -302,10 +303,7 @@ class AgenticCodeFixer:
 
         # Update patch statuses
         for patch in patches:
-            if patch.id == winning_patch.id:
-                self.patch_manager.update_patch_status(patch.id, PatchStatus.EVALUATED)
-            else:
-                self.patch_manager.update_patch_status(patch.id, PatchStatus.EVALUATED)
+            self.patch_manager.update_patch_status(patch.id, PatchStatus.EVALUATED)
 
         self.experiment_logger.log_evaluation_complete(evaluation_results, winning_patch)
 
@@ -466,5 +464,5 @@ async def run_from_config(config_path: str | Path) -> ExperimentMetadata:
     from core import load_config
 
     config = load_config(config_path)
-    fixer = AgenticCodeFixer(config)
+    fixer = AgenticCodeFixer(config) #TODO: Before running the experiment, index the code. Check if the code is indexed before running run_experiment.
     return await fixer.run_experiment()

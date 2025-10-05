@@ -63,7 +63,7 @@ class OpenCodeConfig(BaseModel):
     Attributes:
         enabled: Whether to use OpenCode SST for agent orchestration.
         base_url: Optional custom OpenCode SST service endpoint.
-        api_key: Optional API key for OpenCode SST authentication.
+        api_key: Optional API key for OpenCode SST authentication. #TODO: Check if this is needed
         max_parallel_agents: Maximum number of agents to run simultaneously.
         timeout_seconds: Maximum time allowed for patch generation per agent.
     """
@@ -189,6 +189,7 @@ def load_config(config_path: str | Path) -> Config:
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
     with open(config_path, "r", encoding="utf-8") as f:
+        #TODO: Use only one, yaml or json
         if config_path.suffix.lower() in [".yaml", ".yml"]:
             data = yaml.safe_load(f)
         elif config_path.suffix.lower() == ".json":

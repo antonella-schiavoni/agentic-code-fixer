@@ -90,7 +90,7 @@ class AgentOrchestrator:
         # Get relevant code contexts
         relevant_contexts = code_indexer.search_relevant_context(
             problem_description=problem_description,
-            top_k=10
+            top_k=10 #TODO: We may need to increase this number
         )
 
         if not relevant_contexts:
@@ -107,6 +107,7 @@ class AgentOrchestrator:
         all_patches = []
         tasks = []
 
+        #TODO: Evaluate if this logic makes sense. Each agent generates a solution for a single file.
         for target_file in target_files:
             # Get contexts specific to this file
             file_contexts = [ctx for ctx in relevant_contexts if ctx.file_path == target_file]

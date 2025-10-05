@@ -102,6 +102,8 @@ class OpenCodeAgent:
             )
 
             # Generate patch using Claude
+
+            #TODO: Force the agent to return a JSON object (also maybe add a schema)
             response = await self.client.messages.create(
                 model=self.agent_config.model_name,
                 max_tokens=self.agent_config.max_tokens,
@@ -235,6 +237,7 @@ Dependencies: {', '.join(context.dependencies) if context.dependencies else 'Non
                 return None
 
             # Try to extract JSON from the response
+            #TODO: This shouldnt be needed, we should force the agent to return a JSON object
             json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
             if json_match:
                 patch_data = json.loads(json_match.group(1))

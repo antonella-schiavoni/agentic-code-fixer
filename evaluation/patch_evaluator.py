@@ -147,7 +147,7 @@ class PatchEvaluator:
     ) -> EvaluationResult:
         """Evaluate a pair of patches and determine the winner."""
         try:
-            system_prompt = self._create_evaluation_system_prompt()
+            system_prompt = self._create_evaluation_system_prompt() 
             user_prompt = self._create_evaluation_user_prompt(
                 patch_a=patch_a,
                 patch_b=patch_b,
@@ -155,6 +155,7 @@ class PatchEvaluator:
                 original_code=original_code,
             )
 
+            #TODO: Force the agent to return a JSON object (also maybe add a schema)
             response = await self.claude_client.messages.create(
                 model=self.config.model_name,
                 max_tokens=self.config.max_tokens,

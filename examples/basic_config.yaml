@@ -4,10 +4,10 @@
 # Repository settings
 repository_path: "/path/to/your/repository"
 problem_description: "Fix the bug in the authentication module where users cannot log in"
-target_files:
+target_files: #TODO: Does it make sense to include target_files here?
   - "src/auth.py"
   - "src/login.py"
-exclude_patterns:
+exclude_patterns: #TODO: Does it make sense to include exclude_patterns here?
   - "*.pyc"
   - "__pycache__"
   - ".git"
@@ -15,9 +15,10 @@ exclude_patterns:
   - "*.log"
 
 # Number of patch candidates to generate
-num_patch_candidates: 8
+num_patch_candidates: 8 #TODO: rename it to num_candidate_solutions
 
-# Agent configurations
+# Agent configurations 
+#TODO: Does it make sense to include agents here?
 agents:
   - agent_id: "general_fixer"
     model_name: "claude-sonnet-4-5-20250929"
@@ -35,7 +36,7 @@ agents:
 
   - agent_id: "performance_optimizer"
     model_name: "claude-sonnet-4-5-20250929"
-    temperature: 0.6
+    temperature: 0.6  #TODO: Validate if temperature ranges between 0.0 and 2.0
     max_tokens: 2048
     system_prompt: "You are a performance expert focused on efficient solutions and optimization."
     specialized_role: "performance"
