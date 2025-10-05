@@ -91,7 +91,7 @@ class AgenticCodeFixer:
             repository_path=config.repository_path,
             problem_description=config.problem_description,
             num_agents=len(config.agents),
-            num_patches_generated=config.num_patch_candidates,
+            num_patches_generated=config.num_candidate_solutions,
             evaluation_method=config.evaluation.method,
         )
 

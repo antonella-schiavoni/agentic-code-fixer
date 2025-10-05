@@ -18,8 +18,8 @@ exclude_patterns:
   - "docs/"
   - "*.md"
 
-# Generate more candidates for complex problems
-num_patch_candidates: 15
+# Generate more candidate solutions for complex problems
+num_candidate_solutions: 15
 
 # Diverse agent configurations with specialized roles
 agents:

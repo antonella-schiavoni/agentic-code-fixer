@@ -156,7 +156,7 @@ def validate_config(
         # Print config summary
         console.print(f"Repository: {config.repository_path}")
         console.print(f"Agents: {len(config.agents)}")
-        console.print(f"Target patches: {config.num_patch_candidates}")
+        console.print(f"Target candidate solutions: {config.num_candidate_solutions}")
         console.print(f"Evaluation method: {config.evaluation.method}")
 
     except Exception as e:

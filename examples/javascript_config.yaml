@@ -16,8 +16,8 @@ exclude_patterns:
   - "build/"
   - "coverage/"
 
-# Number of patch candidates
-num_patch_candidates: 10
+# Number of candidate solutions
+num_candidate_solutions: 10
 
 # JavaScript-focused agents
 agents:

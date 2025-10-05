@@ -161,7 +161,7 @@ class AgentOrchestrator:
             all_patches.sort(key=lambda p: p.confidence_score, reverse=True)
 
             # Limit to requested number of candidates
-            final_patches = all_patches[:self.config.num_patch_candidates]
+            final_patches = all_patches[:self.config.num_candidate_solutions]
 
             logger.info(f"Generated {len(final_patches)} patch candidates")
             return final_patches
@@ -257,7 +257,7 @@ class AgentOrchestrator:
         unique_patches.sort(key=lambda p: p.confidence_score, reverse=True)
 
         # Return top candidates
-        final_diverse_patches = unique_patches[:self.config.num_patch_candidates]
+        final_diverse_patches = unique_patches[:self.config.num_candidate_solutions]
 
         logger.info(f"Generated {len(final_diverse_patches)} diverse patch candidates")
         return final_diverse_patches
@@ -364,7 +364,7 @@ class AgentOrchestrator:
 
         stats = {
             "total_agents": len(self.agents),
-            "target_patch_candidates": self.config.num_patch_candidates,
+            "target_candidate_solutions": self.config.num_candidate_solutions,
             "agents": agent_stats,
             "opencode_integration": {
                 "sessions_enabled": self.opencode_config.use_sessions,

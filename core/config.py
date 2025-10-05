@@ -163,7 +163,7 @@ class Config(BaseModel):
 
     # Agent configuration
     agents: list[AgentConfig] = Field(description="List of agent configurations")
-    num_patch_candidates: int = Field(default=10, gt=0)
+    num_candidate_solutions: int = Field(default=10, gt=0)
 
     # Component configurations
     vectordb: VectorDBConfig = Field(default_factory=VectorDBConfig)

@@ -14,8 +14,8 @@ exclude_patterns: #TODO: Does it make sense to include exclude_patterns here?
   - "node_modules"
   - "*.log"
 
-# Number of patch candidates to generate
-num_patch_candidates: 8 #TODO: rename it to num_candidate_solutions
+# Number of candidate solutions to generate
+num_candidate_solutions: 8
 
 # Agent configurations 
 #TODO: Does it make sense to include agents here?

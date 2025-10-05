@@ -437,7 +437,7 @@ opencode providers list
 
 #### 4. **Legacy Issues**
 - **Test Failures**: Check that test commands work in your repository
-- **Memory Issues**: Reduce `num_patch_candidates` for large codebases
+- **Memory Issues**: Reduce `num_candidate_solutions` for large codebases
 - **Timeout Errors**: Increase `session_timeout_seconds` in OpenCode configuration
 
 ### Debug Mode
