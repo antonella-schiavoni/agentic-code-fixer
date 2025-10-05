@@ -19,7 +19,7 @@ from pathlib import Path
 
 from indexing.vector_store import VectorStore
 
-from core.config import VectorDBConfig
+from core.config import VectorDBConfig, OpenCodeConfig
 from core.types import CodeContext
 
 logger = logging.getLogger(__name__)
@@ -48,15 +48,23 @@ class CodeIndexer:
         language_extensions: Mapping of programming languages to file extensions.
     """
 
-    def __init__(self, config: VectorDBConfig) -> None:
+    def __init__(self, config: VectorDBConfig, opencode_config: OpenCodeConfig | None = None) -> None:
         """Initialize the code indexer with vector database configuration.
 
         Args:
             config: Vector database configuration including embedding model,
                 storage settings, and chunking parameters.
+            opencode_config: Optional OpenCode configuration for enhanced analysis.
         """
         self.config = config
+        self.opencode_config = opencode_config
         self.vector_store = VectorStore(config)
+
+        # Initialize OpenCode client for enhanced analysis if available
+        self.opencode_client = None
+        if opencode_config and opencode_config.enabled:
+            from opencode_client import OpenCodeClient
+            self.opencode_client = OpenCodeClient(opencode_config)
 
         # Language-specific file extensions
         self.language_extensions = {
@@ -134,6 +142,175 @@ class CodeIndexer:
     def get_file_context(self, file_path: str) -> list[CodeContext]:
         """Get all contexts for a specific file."""
         return self.vector_store.get_context_by_file(file_path)
+
+    async def search_relevant_context_with_dependencies(
+        self,
+        problem_description: str,
+        top_k: int = 10,
+        include_usage_analysis: bool = True,
+        max_related_files: int = 20,
+    ) -> list[CodeContext]:
+        """Enhanced search that includes related code found through dependency analysis.
+
+        This method extends the basic vector search by using OpenCode's file analysis
+        capabilities to find code that uses or depends on the initially found relevant code.
+        This helps capture a more complete picture of what might need to be considered
+        when generating patches.
+
+        Args:
+            problem_description: Description of the problem to solve.
+            top_k: Number of initial contexts to find via vector search.
+            include_usage_analysis: Whether to find code that uses the target code.
+            max_related_files: Maximum number of additional related files to include.
+
+        Returns:
+            List of CodeContext objects including both vector-search results and
+            related code found through dependency analysis.
+        """
+        # Get base contexts from vector search
+        base_contexts = self.search_relevant_context(
+            problem_description=problem_description,
+            top_k=top_k
+        )
+
+        if not self.opencode_client or not include_usage_analysis:
+            return base_contexts
+
+        logger.info(f"Analyzing dependencies for {len(base_contexts)} base contexts")
+
+        # Find related code using OpenCode's file analysis
+        related_contexts = await self._find_related_code_contexts(
+            base_contexts=base_contexts,
+            max_related_files=max_related_files
+        )
+
+        # Combine results, prioritizing base contexts
+        all_contexts = base_contexts + related_contexts
+
+        # Remove duplicates based on file path and content similarity
+        unique_contexts = self._deduplicate_contexts(all_contexts)
+
+        logger.info(
+            f"Enhanced search found {len(base_contexts)} base + "
+            f"{len(related_contexts)} related = {len(unique_contexts)} total contexts"
+        )
+
+        return unique_contexts[:top_k + max_related_files]
+
+    async def _find_related_code_contexts(
+        self,
+        base_contexts: list[CodeContext],
+        max_related_files: int = 20
+    ) -> list[CodeContext]:
+        """Find code contexts related to the base contexts using OpenCode file analysis."""
+        related_contexts = []
+
+        for context in base_contexts:
+            try:
+                # Extract function/class names from the context
+                function_names = context.relevant_functions
+
+                if not function_names:
+                    continue
+
+                # Use OpenCode to find usages of these functions
+                for func_name in function_names[:5]:  # Limit to avoid too many requests
+                    related_files = await self._find_function_usages(func_name)
+
+                    for file_path in related_files[:3]:  # Limit files per function
+                        if file_path != context.file_path:  # Skip same file
+                            related_context = await self._create_context_from_file(file_path)
+                            if related_context:
+                                related_contexts.append(related_context)
+
+                if len(related_contexts) >= max_related_files:
+                    break
+
+            except Exception as e:
+                logger.warning(f"Failed to find related contexts for {context.file_path}: {e}")
+
+        return related_contexts[:max_related_files]
+
+    async def _find_function_usages(self, function_name: str) -> list[str]:
+        """Use OpenCode's find API to locate files that use a specific function."""
+        if not self.opencode_client:
+            return []
+
+        try:
+            # Use OpenCode's find endpoint to search for function usage patterns
+            search_patterns = [
+                f"{function_name}(",  # Function calls
+                f"from .* import.*{function_name}",  # Import statements
+                f"import.*{function_name}",  # Direct imports
+            ]
+
+            found_files = set()
+            for pattern in search_patterns:
+                try:
+                    # Use OpenCode's file search API
+                    results = await self.opencode_client.find_in_files(pattern)
+
+                    # Extract file paths from results
+                    for result in results:
+                        if isinstance(result, dict) and 'path' in result:
+                            found_files.add(result['path'])
+
+                except Exception as e:
+                    logger.debug(f"Search pattern '{pattern}' failed: {e}")
+
+            return list(found_files)[:10]  # Limit results
+
+        except Exception as e:
+            logger.warning(f"Failed to find usages of function '{function_name}': {e}")
+            return []
+
+    async def _create_context_from_file(self, file_path: str) -> CodeContext | None:
+        """Create a CodeContext from a file path, checking if it's already indexed."""
+        try:
+            # First check if we already have this file in our vector store
+            existing_contexts = self.get_file_context(file_path)
+            if existing_contexts:
+                return existing_contexts[0]  # Return first context for this file
+
+            # If not indexed, create a new context by reading the file
+            full_path = Path(self.config.repository_path if hasattr(self.config, 'repository_path') else '.') / file_path
+
+            if not full_path.exists():
+                return None
+
+            with open(full_path, encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+
+            if not content.strip():
+                return None
+
+            # Determine language and create context
+            language = self._detect_language(full_path)
+            context = CodeContext(
+                file_path=str(file_path),
+                content=content,
+                language=language,
+                relevant_functions=self._extract_functions(content, language),
+                dependencies=self._extract_dependencies(content, language),
+            )
+
+            return context
+
+        except Exception as e:
+            logger.warning(f"Failed to create context from file {file_path}: {e}")
+            return None
+
+    def _deduplicate_contexts(self, contexts: list[CodeContext]) -> list[CodeContext]:
+        """Remove duplicate contexts based on file path."""
+        seen_files = set()
+        unique_contexts = []
+
+        for context in contexts:
+            if context.file_path not in seen_files:
+                seen_files.add(context.file_path)
+                unique_contexts.append(context)
+
+        return unique_contexts
 
     def _find_code_files(
         self,

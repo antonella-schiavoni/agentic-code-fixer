@@ -209,6 +209,60 @@ class OpenCodeClient:
         logger.debug(f"Executed shell command in session {session_id}: {command}")
         return result
 
+    async def find_in_files(self, pattern: str) -> list[dict[str, any]]:
+        """Find text patterns in files using OpenCode's find API.
+
+        Uses OpenCode's /find endpoint to search for text patterns across files.
+        This is useful for finding code dependencies and usage patterns.
+
+        Args:
+            pattern: Text pattern to search for (supports regex).
+
+        Returns:
+            List of match objects with path, lines, line numbers, and submatches.
+        """
+        endpoint = f"{self.base_url}/find"
+        params = {"pattern": pattern}
+
+        try:
+            response = await self.session.get(endpoint, params=params)
+            response.raise_for_status()
+
+            results = response.json()
+            logger.debug(f"Found {len(results)} matches for pattern: {pattern}")
+            return results
+
+        except Exception as e:
+            logger.error(f"Failed to find pattern '{pattern}': {e}")
+            return []
+
+    async def find_symbols(self, query: str) -> list[dict[str, any]]:
+        """Find workspace symbols using OpenCode's symbol search API.
+
+        Uses OpenCode's /find/symbol endpoint to search for symbols (functions, classes, etc.)
+        across the workspace. Useful for finding definitions and references.
+
+        Args:
+            query: Symbol search query.
+
+        Returns:
+            List of symbol objects with location and definition information.
+        """
+        endpoint = f"{self.base_url}/find/symbol"
+        params = {"query": query}
+
+        try:
+            response = await self.session.get(endpoint, params=params)
+            response.raise_for_status()
+
+            results = response.json()
+            logger.debug(f"Found {len(results)} symbols for query: {query}")
+            return results
+
+        except Exception as e:
+            logger.error(f"Failed to find symbols for '{query}': {e}")
+            return []
+
     async def search_files(
         self,
         session_id: str,

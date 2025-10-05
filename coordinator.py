@@ -74,7 +74,7 @@ class AgenticCodeFixer:
         config.ensure_output_dir()
 
         # Initialize components
-        self.code_indexer = CodeIndexer(config.vectordb)
+        self.code_indexer = CodeIndexer(config.vectordb, config.opencode)
         self.agent_orchestrator = AgentOrchestrator(config)
         self.patch_evaluator = PatchEvaluator(
             config.evaluation,
