@@ -15,13 +15,10 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.table import Table
-
-from core.types import EvaluationResult, ExperimentMetadata, PatchCandidate, TestResult
 
 
 class ReportGenerator:
@@ -61,7 +58,7 @@ class ReportGenerator:
         # Load experiment data
         self.experiment_data = self._load_experiment_data()
 
-    def _load_experiment_data(self) -> Dict[str, Any]:
+    def _load_experiment_data(self) -> dict[str, Any]:
         """Load and parse experiment data from the JSON data file.
 
         Returns:
@@ -77,7 +74,7 @@ class ReportGenerator:
         if not experiment_file.exists():
             raise FileNotFoundError(f"Experiment data not found: {experiment_file}")
 
-        with open(experiment_file, "r", encoding="utf-8") as f:
+        with open(experiment_file, encoding="utf-8") as f:
             return json.load(f)
 
     def generate_summary_report(self) -> str:
@@ -290,7 +287,7 @@ class ReportGenerator:
 
         self.console.print(table)
 
-    def save_report(self, output_file: Optional[str | Path] = None, format: str = "markdown") -> Path:
+    def save_report(self, output_file: str | Path | None = None, format: str = "markdown") -> Path:
         """Save a comprehensive report to the specified file format.
 
         Creates and saves either a detailed Markdown report or structured JSON
@@ -336,7 +333,7 @@ class ReportGenerator:
 
         return output_file
 
-    def export_statistics(self) -> Dict[str, Any]:
+    def export_statistics(self) -> dict[str, Any]:
         """Extract and calculate comprehensive statistics from experiment data.
 
         Analyzes all experiment data to produce detailed statistics including

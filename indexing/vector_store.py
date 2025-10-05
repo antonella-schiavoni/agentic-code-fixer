@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import chromadb
-import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from core.config import VectorDBConfig
@@ -36,7 +34,7 @@ class VectorStore:
 
         logger.info(f"Initialized vector store with collection: {config.collection_name}")
 
-    def add_code_context(self, contexts: List[CodeContext]) -> None:
+    def add_code_context(self, contexts: list[CodeContext]) -> None:
         """Add code contexts to the vector store."""
         if not contexts:
             return
@@ -76,9 +74,9 @@ class VectorStore:
         self,
         query: str,
         top_k: int = 10,
-        file_filter: Optional[str] = None,
-        language_filter: Optional[str] = None,
-    ) -> List[Tuple[CodeContext, float]]:
+        file_filter: str | None = None,
+        language_filter: str | None = None,
+    ) -> list[tuple[CodeContext, float]]:
         """Search for similar code contexts."""
         # Generate query embedding
         query_embedding = self.embedding_model.encode([query]).tolist()[0]
@@ -124,7 +122,7 @@ class VectorStore:
         logger.info(f"Found {len(contexts_with_scores)} similar contexts for query")
         return contexts_with_scores
 
-    def get_context_by_file(self, file_path: str) -> List[CodeContext]:
+    def get_context_by_file(self, file_path: str) -> list[CodeContext]:
         """Get all contexts for a specific file."""
         results = self.collection.query(
             query_embeddings=[[0.0] * self.embedding_model.get_sentence_embedding_dimension()],
@@ -156,7 +154,7 @@ class VectorStore:
         )
         logger.info("Cleared vector store collection")
 
-    def get_collection_stats(self) -> Dict[str, int]:
+    def get_collection_stats(self) -> dict[str, int]:
         """Get statistics about the collection."""
         count = self.collection.count()
         return {

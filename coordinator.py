@@ -11,17 +11,16 @@ and detailed experiment tracking for reproducible and analyzable automated code 
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from agents import AgentOrchestrator
 from core import Config, EvaluationMethod, ExperimentMetadata, PatchStatus, TestResult
 from evaluation import EloRanker, PatchEvaluator
+from experiment_logging import ExperimentLogger, ReportGenerator
 from indexing import CodeIndexer
-from logging import ExperimentLogger, ReportGenerator
 from patching import PatchApplicator, PatchManager
 
 logger = logging.getLogger(__name__)
@@ -79,9 +78,9 @@ class AgenticCodeFixer:
         self.agent_orchestrator = AgentOrchestrator(config)
         self.patch_evaluator = PatchEvaluator(
             config.evaluation,
-            claude_api_key=config.claude_api_key
+            config.opencode
         )
-        self.patch_applicator = PatchApplicator(config.testing)
+        self.patch_applicator = PatchApplicator(config.testing, config.opencode)
         self.elo_ranker = EloRanker(
             k_factor=config.evaluation.elo_k_factor,
             initial_rating=1200.0
@@ -201,7 +200,7 @@ class AgenticCodeFixer:
         self.experiment_logger.log_info(f"Indexed {len(contexts)} code contexts")
         logger.info(f"Codebase indexing completed: {len(contexts)} contexts")
 
-    async def _generate_patches(self) -> List:
+    async def _generate_patches(self) -> list:
         """Generate diverse patch candidates using multi-agent orchestration.
 
         Coordinates parallel execution of multiple specialized AI agents to generate
@@ -232,7 +231,7 @@ class AgenticCodeFixer:
         logger.info(f"Generated {len(patches)} patch candidates")
         return patches
 
-    async def _evaluate_patches(self, patches: List) -> Optional:
+    async def _evaluate_patches(self, patches: list) -> Optional:
         """Evaluate patch candidates and determine the optimal solution.
 
         Uses the configured evaluation methodology (AB testing or ELO tournament)
@@ -255,6 +254,18 @@ class AgenticCodeFixer:
 
         method = self.config.evaluation.method
         self.experiment_logger.log_evaluation_start(len(patches), method.value)
+
+        # Set up OpenCode session for evaluation if enabled
+        if self.config.opencode.enabled and self.patch_evaluator.opencode_client:
+            try:
+                eval_session = await self.patch_evaluator.opencode_client.initialize_session_for_repository(
+                    repository_path=self.config.repository_path,
+                    problem_description=f"Patch evaluation: {self.config.problem_description}"
+                )
+                self.patch_evaluator.set_session_id(eval_session.session_id)
+                logger.info(f"Created evaluation session: {eval_session.session_id}")
+            except Exception as e:
+                logger.warning(f"Failed to create evaluation session: {e}")
 
         # Get original code for context
         original_code = self._get_original_code(patches[0].file_path)
@@ -372,7 +383,7 @@ class AgenticCodeFixer:
         """
         try:
             full_path = Path(self.config.repository_path) / file_path
-            with open(full_path, "r", encoding="utf-8") as f:
+            with open(full_path, encoding="utf-8") as f:
                 return f.read()
         except Exception as e:
             logger.warning(f"Could not read original code from {file_path}: {e}")

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, List
 
 from core.types import EloRating, EvaluationResult, PatchCandidate
 
@@ -52,11 +51,11 @@ class EloRanker:
         """
         self.k_factor = k_factor
         self.initial_rating = initial_rating
-        self.ratings: Dict[str, EloRating] = {}
+        self.ratings: dict[str, EloRating] = {}
 
         logger.info(f"Initialized ELO ranker (K={k_factor}, initial={initial_rating})")
 
-    def initialize_patch_ratings(self, patches: List[PatchCandidate]) -> None:
+    def initialize_patch_ratings(self, patches: list[PatchCandidate]) -> None:
         """Initialize ELO ratings for patch candidates."""
         for patch in patches:
             if patch.id not in self.ratings:
@@ -69,7 +68,7 @@ class EloRanker:
 
     def update_ratings_from_evaluations(
         self,
-        evaluation_results: List[EvaluationResult],
+        evaluation_results: list[EvaluationResult],
     ) -> None:
         """Update ELO ratings based on evaluation results."""
         if not evaluation_results:
@@ -146,7 +145,7 @@ class EloRanker:
         """Calculate expected score for player A against player B."""
         return 1.0 / (1.0 + math.pow(10, (rating_b - rating_a) / 400.0))
 
-    def get_ranked_patches(self, patches: List[PatchCandidate]) -> List[PatchCandidate]:
+    def get_ranked_patches(self, patches: list[PatchCandidate]) -> list[PatchCandidate]:
         """Get patches ranked by ELO rating."""
         # Sort patches by their ELO rating
         sorted_patches = sorted(
@@ -158,7 +157,7 @@ class EloRanker:
         logger.info("Ranked patches by ELO rating")
         return sorted_patches
 
-    def get_top_patch(self, patches: List[PatchCandidate]) -> PatchCandidate:
+    def get_top_patch(self, patches: list[PatchCandidate]) -> PatchCandidate:
         """Get the highest-rated patch."""
         if not patches:
             raise ValueError("No patches provided")
@@ -177,13 +176,13 @@ class EloRanker:
         """Get ELO rating for a specific patch."""
         return self.ratings.get(patch_id, EloRating(patch_id=patch_id, rating=self.initial_rating))
 
-    def get_all_ratings(self) -> List[EloRating]:
+    def get_all_ratings(self) -> list[EloRating]:
         """Get all ELO ratings sorted by rating."""
         return sorted(self.ratings.values(), key=lambda r: r.rating, reverse=True)
 
     def tournament_selection(
         self,
-        patches: List[PatchCandidate],
+        patches: list[PatchCandidate],
         tournament_size: int = 3,
     ) -> PatchCandidate:
         """Select a patch using tournament selection based on ELO ratings."""
@@ -200,9 +199,9 @@ class EloRanker:
 
     def simulate_tournament(
         self,
-        patches: List[PatchCandidate],
+        patches: list[PatchCandidate],
         num_rounds: int = 100,
-    ) -> List[PatchCandidate]:
+    ) -> list[PatchCandidate]:
         """Simulate a tournament to determine final rankings."""
         logger.info(f"Starting ELO tournament with {len(patches)} patches for {num_rounds} rounds")
 
@@ -247,7 +246,7 @@ class EloRanker:
 
         return final_rankings
 
-    def get_tournament_stats(self) -> Dict[str, any]:
+    def get_tournament_stats(self) -> dict[str, any]:
         """Get statistics about the current tournament state."""
         if not self.ratings:
             return {"total_patches": 0}

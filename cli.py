@@ -12,15 +12,14 @@ execution to result analysis and reporting.
 from __future__ import annotations
 
 import asyncio
+from logging import ReportGenerator
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
 
-from coordinator import AgenticCodeFixer, run_from_config
+from coordinator import run_from_config
 from core import create_default_config, load_config
-from logging import ReportGenerator
 
 app = typer.Typer(name="agentic-code-fixer", help="Automated code patch generation and evaluation")
 console = Console()
@@ -29,7 +28,7 @@ console = Console()
 @app.command()
 def run(
     config_path: str = typer.Argument(..., help="Path to configuration file"),
-    output_dir: Optional[str] = typer.Option(None, help="Override output directory"),
+    output_dir: str | None = typer.Option(None, help="Override output directory"),
 ) -> None:
     """Execute a complete automated code fixing experiment.
 
@@ -53,7 +52,7 @@ def run(
         experiment_metadata = asyncio.run(run_from_config(config_path))
 
         if experiment_metadata.success:
-            console.print(f"[green]✓ Experiment completed successfully![/green]")
+            console.print("[green]✓ Experiment completed successfully![/green]")
             console.print(f"Winning patch: {experiment_metadata.winning_patch_id}")
             console.print(f"Duration: {experiment_metadata.total_duration_seconds:.1f}s")
         else:
@@ -104,7 +103,7 @@ def create_config(
 def report(
     experiment_dir: str = typer.Argument(..., help="Path to experiment directory"),
     format: str = typer.Option("markdown", help="Report format (markdown, json)"),
-    output_file: Optional[str] = typer.Option(None, help="Output file path"),
+    output_file: str | None = typer.Option(None, help="Output file path"),
 ) -> None:
     """Generate comprehensive reports from completed experiment data.
 
@@ -152,7 +151,7 @@ def validate_config(
     """
     try:
         config = load_config(config_path)
-        console.print(f"[green]✓ Configuration file is valid[/green]")
+        console.print("[green]✓ Configuration file is valid[/green]")
 
         # Print config summary
         console.print(f"Repository: {config.repository_path}")

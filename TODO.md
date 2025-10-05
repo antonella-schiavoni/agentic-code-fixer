@@ -1,0 +1,41 @@
+- [X] Consider the OpenCode documentation and do not reinvent existing features ([opencode docs](https://opencode.ai/docs/server/))
+- [ ] Rename "settings" to "num_candidate_solutions"
+- [ ] Review "settings" for unnecessary items or those already available initially (e.g., relevant files or input)
+- [ ] Check temperature value; it should be between 0 and 1, currently 2 is used
+- [ ] Improvement: Fixes might apply not only to files retrieved from the vectordb but also to other functions using that code; consider using the LSP server for recursive usage analysis with limits
+- [ ] Simplify the evaluation system, possibly use only ELO rating
+- [ ] In run_experiment, call index_codebase() only if not already indexed
+- [ ] Verify how indexing is done (function level, file level, etc.); consider other files in the same directory
+- [ ] Avoid passing the indexer to functions repeatedly; do it once at the start (if not already done) and update vectordb indices at the end if changes occurred
+- [ ] Before calling an LLM evaluator during evaluation, check if tests pass and code compiles (e.g., by checking LSP server errors)
+- [ ] Remove unused imports (e.g., unused asyncio import in coordinator)
+- [ ] After updates, update documentation properly in the project and ensure agents consider these updates
+- [ ] run_from_config should run everything from a config file, but allow user input during execution, e.g., `python main.py --input "issue description"`; optionally add `--context=path/to/files` to include those files along with vectordb data
+- [ ] Support only YAML format in config files
+- [ ] Consider adding `--exclude-patterns` option in CLI
+- [ ] Make ChromaDB embedding model configurable to support other models later (Claude, OpenAI); changing vector model requires full re-indexing
+- [ ] Improvement: ChromaDB has a max chunk size of 500; if a function's code is bigger, it's split into multiple chunks which may cause incomplete function context when fixing; solution is to use hierarchical RAG or store the start and end lines of the entire function in vectordb
+- [ ] Read API keys from a `.env` file to avoid committing secrets; config should load from there
+- [ ] In the coordinator, before run_experiment, index if not already done; after experiment changes, update vectordb indices with modified code
+- [ ] In code_indexer.py, handle language extensions carefully; consider cases with no extension; add TODO to support more languages
+- [ ] Create separate classes for each programming language in code_indexer, all implementing the same interface (e.g., extract_imports, extract_functions, extract_classes)
+- [ ] Currently, AST is used only for Python; consider libraries for other languages but keeping as TODO is fine for now
+- [ ] Check if vectordb metadata search is possible; useful for filtering chunks by file or function context
+- [ ] Remove `target_files` concept
+- [ ] Evaluate if in agent_orchestrator.py, calling agents per file in generate_patches is appropriate to avoid conflicting solutions across files
+- [ ] In opencode_agent.py, `_create_system_prompt`, make agents in separate classes if they do different tasks instead of conditional branches
+- [ ] In opencode_agent.py, `_create_user_prompt`, change from per-file context to aggregate all contexts from vectordb to handle more global real-world problems
+- [ ] When calling LLM, force JSON output with schema to ensure consistent format
+- [ ] Rename `num_patch_candidates` to `num_candidate_solutions`; one patch is per file but a solution can affect multiple files; LLM should return a list of patches with all changed files and code parts; limit candidate solutions before generation to save tokens
+- [ ] For evaluation, avoid IF-based selection; use two separate classes and select based on config
+- [ ] Improve abstraction to avoid tight coupling to Claude; make evaluator configurable
+- [ ] Evaluator currently uses confidence levels; improve by running tests as part of evaluation
+- [ ] For non-Python tests, consider using LLM or MCP to determine how to run tests
+- [ ] Add integration tests: use a sample repo with bugs and ask the system to fix (test the full workflow)
+- [ ] Use OpenCode sessions to "copy" a repo:
+  - [ ] Create session: POST /session
+  - [ ] Delete session: DELETE /session/:id
+  - [ ] Run shell commands (e.g., tests): POST /session/:id/shell
+- [ ] Sessions are isolated instances for code interaction and AI help, each with a unique ID
+- [ ] Manage multiple sessions for parallel work in different contexts or directories without interference
+- [ ] Use OpenCode server API to control sessions, send prompts, and execute shell commands programmatically

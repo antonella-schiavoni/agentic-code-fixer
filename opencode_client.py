@@ -1,0 +1,402 @@
+"""OpenCode SST API client for session management and agent orchestration.
+
+This module provides a comprehensive client for interacting with OpenCode SST
+server endpoints. It handles session creation, agent execution, shell commands,
+and code analysis through OpenCode's REST API.
+
+The client enables leveraging OpenCode's built-in capabilities for session
+management, real-time event streaming, and isolated execution environments
+instead of implementing these features from scratch.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import httpx
+from pydantic import BaseModel
+
+from core.config import OpenCodeConfig
+
+logger = logging.getLogger(__name__)
+
+
+class OpenCodeSession(BaseModel):
+    """Represents an OpenCode SST session.
+
+    Attributes:
+        session_id: Unique identifier for the session.
+        parent_id: Optional parent session ID for hierarchical sessions.
+        status: Current status of the session.
+        created_at: Session creation timestamp.
+        metadata: Additional session metadata.
+    """
+
+    session_id: str
+    parent_id: str | None = None
+    status: str = "active"
+    created_at: str
+    metadata: dict[str, Any] = {}
+
+
+class OpenCodeShellResult(BaseModel):
+    """Result from executing a shell command in OpenCode session.
+
+    Attributes:
+        command: The shell command that was executed.
+        exit_code: Command exit status code.
+        stdout: Standard output from the command.
+        stderr: Standard error output from the command.
+        execution_time: Time taken to execute the command in seconds.
+    """
+
+    command: str
+    exit_code: int
+    stdout: str
+    stderr: str
+    execution_time: float
+
+
+class OpenCodeClient:
+    """Async client for OpenCode SST server API interactions.
+
+    This client provides comprehensive access to OpenCode SST functionality
+    including session management, agent orchestration, shell execution, and
+    code analysis. It replaces custom implementations with OpenCode's
+    proven infrastructure.
+
+    Attributes:
+        config: OpenCode configuration settings.
+        client: Async HTTP client for API requests.
+        active_sessions: Dictionary of currently active sessions.
+    """
+
+    def __init__(self, config: OpenCodeConfig) -> None:
+        """Initialize the OpenCode SST client.
+
+        Args:
+            config: OpenCode configuration including server details and settings.
+        """
+        self.config = config
+        self.client = httpx.AsyncClient(
+            base_url=config.server_url,
+            timeout=httpx.Timeout(config.session_timeout_seconds)
+        )
+        self.active_sessions: dict[str, OpenCodeSession] = {}
+
+        logger.info(f"Initialized OpenCode client for {config.server_url}")
+
+    async def __aenter__(self) -> OpenCodeClient:
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Async context manager exit."""
+        await self.close()
+
+    async def close(self) -> None:
+        """Close the HTTP client and cleanup active sessions."""
+        # Clean up active sessions
+        for session_id in list(self.active_sessions.keys()):
+            try:
+                await self.delete_session(session_id)
+            except Exception as e:
+                logger.warning(f"Failed to cleanup session {session_id}: {e}")
+
+        await self.client.aclose()
+        logger.info("OpenCode client closed")
+
+    async def create_session(
+        self,
+        parent_id: str | None = None,
+        metadata: dict[str, Any] | None = None
+    ) -> OpenCodeSession:
+        """Create a new OpenCode SST session.
+
+        Args:
+            parent_id: Optional parent session for hierarchical organization.
+            metadata: Additional metadata to associate with the session.
+
+        Returns:
+            OpenCodeSession object representing the created session.
+
+        Raises:
+            httpx.HTTPError: If session creation fails.
+        """
+        payload = {}
+        if parent_id:
+            payload["parent_id"] = parent_id
+        if metadata:
+            payload["metadata"] = metadata
+
+        response = await self.client.post("/session", json=payload)
+        response.raise_for_status()
+
+        session_data = response.json()
+        session = OpenCodeSession(
+            session_id=session_data["id"],
+            parent_id=parent_id,
+            created_at=session_data.get("created_at", ""),
+            metadata=metadata or {}
+        )
+
+        self.active_sessions[session.session_id] = session
+        logger.info(f"Created OpenCode session: {session.session_id}")
+
+        return session
+
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete an OpenCode SST session.
+
+        Args:
+            session_id: ID of the session to delete.
+
+        Returns:
+            True if deletion was successful, False otherwise.
+        """
+        try:
+            response = await self.client.delete(f"/session/{session_id}")
+            response.raise_for_status()
+
+            self.active_sessions.pop(session_id, None)
+            logger.info(f"Deleted OpenCode session: {session_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to delete session {session_id}: {e}")
+            return False
+
+    async def execute_shell_command(
+        self,
+        session_id: str,
+        command: str,
+        timeout: int | None = None
+    ) -> OpenCodeShellResult:
+        """Execute a shell command within an OpenCode session.
+
+        Args:
+            session_id: ID of the session to execute the command in.
+            command: Shell command to execute.
+            timeout: Optional timeout override for this command.
+
+        Returns:
+            OpenCodeShellResult containing command output and status.
+
+        Raises:
+            httpx.HTTPError: If command execution request fails.
+        """
+        payload = {"command": command}
+        if timeout:
+            payload["timeout"] = timeout
+
+        response = await self.client.post(
+            f"/session/{session_id}/shell",
+            json=payload
+        )
+        response.raise_for_status()
+
+        result_data = response.json()
+
+        result = OpenCodeShellResult(
+            command=command,
+            exit_code=result_data.get("exit_code", 0),
+            stdout=result_data.get("stdout", ""),
+            stderr=result_data.get("stderr", ""),
+            execution_time=result_data.get("execution_time", 0.0)
+        )
+
+        logger.debug(f"Executed shell command in session {session_id}: {command}")
+        return result
+
+    async def search_files(
+        self,
+        session_id: str,
+        query: str,
+        file_patterns: list[str] | None = None
+    ) -> list[str]:
+        """Search for files using OpenCode's file search capability.
+
+        Args:
+            session_id: ID of the session to search in.
+            query: Search query for file discovery.
+            file_patterns: Optional file patterns to filter results.
+
+        Returns:
+            List of file paths matching the search criteria.
+        """
+        payload = {"query": query}
+        if file_patterns:
+            payload["patterns"] = file_patterns
+
+        response = await self.client.post(
+            f"/session/{session_id}/files/search",
+            json=payload
+        )
+        response.raise_for_status()
+
+        result = response.json()
+        files = result.get("files", [])
+
+        logger.debug(f"Found {len(files)} files matching query: {query}")
+        return files
+
+    async def get_file_symbols(
+        self,
+        session_id: str,
+        file_path: str
+    ) -> list[dict[str, Any]]:
+        """Get code symbols from a file using OpenCode's analysis.
+
+        Args:
+            session_id: ID of the session containing the file.
+            file_path: Path to the file to analyze.
+
+        Returns:
+            List of symbol information including functions, classes, etc.
+        """
+        response = await self.client.get(
+            f"/session/{session_id}/files/{file_path}/symbols"
+        )
+        response.raise_for_status()
+
+        result = response.json()
+        symbols = result.get("symbols", [])
+
+        logger.debug(f"Found {len(symbols)} symbols in {file_path}")
+        return symbols
+
+    async def send_prompt(
+        self,
+        session_id: str,
+        prompt: str,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
+        agent_id: str | None = None
+    ) -> dict[str, Any]:
+        """Send a prompt to an LLM through OpenCode's provider system.
+
+        OpenCode manages the LLM provider authentication and routing,
+        eliminating the need for direct API key management.
+
+        Args:
+            session_id: ID of the session to send the prompt to.
+            prompt: The prompt text to send to the LLM.
+            model: Model name (e.g., "claude-3-5-sonnet-20241022").
+            temperature: Sampling temperature for response generation.
+            max_tokens: Maximum tokens in the response.
+            system_prompt: Optional system prompt for the LLM.
+            agent_id: Optional specific agent ID for tracking.
+
+        Returns:
+            LLM response containing the generated content and metadata.
+        """
+        payload = {"prompt": prompt}
+
+        if model:
+            payload["model"] = model
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        if system_prompt:
+            payload["system"] = system_prompt
+        if agent_id:
+            payload["agent_id"] = agent_id
+
+        response = await self.client.post(
+            f"/session/{session_id}/prompt",
+            json=payload
+        )
+        response.raise_for_status()
+
+        result = response.json()
+        logger.debug(f"Sent prompt to session {session_id} using model {model or 'default'}")
+
+        return result
+
+    async def list_sessions(self) -> list[OpenCodeSession]:
+        """List all active OpenCode sessions.
+
+        Returns:
+            List of OpenCodeSession objects for all active sessions.
+        """
+        response = await self.client.get("/sessions")
+        response.raise_for_status()
+
+        sessions_data = response.json()
+        sessions = []
+
+        for session_data in sessions_data.get("sessions", []):
+            session = OpenCodeSession(
+                session_id=session_data["id"],
+                parent_id=session_data.get("parent_id"),
+                status=session_data.get("status", "active"),
+                created_at=session_data.get("created_at", ""),
+                metadata=session_data.get("metadata", {})
+            )
+            sessions.append(session)
+
+        logger.debug(f"Listed {len(sessions)} active sessions")
+        return sessions
+
+    async def initialize_session_for_repository(
+        self,
+        repository_path: str,
+        problem_description: str
+    ) -> OpenCodeSession:
+        """Initialize an OpenCode session for a specific repository.
+
+        Creates a session and sets up the working directory to point to the
+        target repository for code analysis and patch generation.
+
+        Args:
+            repository_path: Path to the repository to work with.
+            problem_description: Description of the problem to solve.
+
+        Returns:
+            Initialized OpenCodeSession ready for patch generation work.
+        """
+        session = await self.create_session(
+            metadata={
+                "repository_path": repository_path,
+                "problem_description": problem_description,
+                "purpose": "patch_generation"
+            }
+        )
+
+        # Change to repository directory
+        await self.execute_shell_command(
+            session.session_id,
+            f"cd {repository_path}"
+        )
+
+        logger.info(f"Initialized session {session.session_id} for repository: {repository_path}")
+        return session
+
+    async def run_tests_in_session(
+        self,
+        session_id: str,
+        test_command: str = "pytest",
+        timeout: int | None = None
+    ) -> OpenCodeShellResult:
+        """Run tests within an OpenCode session.
+
+        Args:
+            session_id: ID of the session to run tests in.
+            test_command: Test command to execute (default: pytest).
+            timeout: Optional timeout for test execution.
+
+        Returns:
+            OpenCodeShellResult containing test execution results.
+        """
+        result = await self.execute_shell_command(
+            session_id,
+            test_command,
+            timeout or self.config.session_timeout_seconds
+        )
+
+        logger.info(f"Test execution in session {session_id}: exit_code={result.exit_code}")
+        return result

@@ -17,12 +17,10 @@ import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
 
-import git
-
-from core.config import TestingConfig
+from core.config import OpenCodeConfig, TestingConfig
 from core.types import PatchCandidate, TestResult
+from opencode_client import OpenCodeClient
 
 logger = logging.getLogger(__name__)
 
@@ -35,26 +33,41 @@ class PatchApplicator:
     It supports backup creation, rollback capabilities, and integrated testing to
     ensure patches successfully address issues without introducing regressions.
 
-    The applicator can work with various testing frameworks and provides detailed
-    analysis of test outcomes, including regression detection and failure parsing.
-    It also supports isolated test environments for safe patch validation.
+    The applicator can leverage OpenCode SST for shell execution when available,
+    providing better isolation and execution tracking. It falls back to local
+    subprocess execution when OpenCode is not available or disabled.
 
     Attributes:
         config: Testing configuration including commands, timeouts, and validation rules.
+        opencode_config: Optional OpenCode configuration for shell execution.
+        opencode_client: Optional OpenCode client for session-based testing.
     """
 
-    def __init__(self, config: TestingConfig) -> None:
+    def __init__(
+        self,
+        config: TestingConfig,
+        opencode_config: OpenCodeConfig | None = None
+    ) -> None:
         """Initialize the patch applicator with testing and validation configuration.
 
         Sets up the applicator with specified testing parameters, timeout settings,
         and validation rules for patch application and verification processes.
+        Optionally configures OpenCode integration for enhanced shell execution.
 
         Args:
             config: TestingConfig object containing test commands, timeout settings,
                 and regression detection parameters.
+            opencode_config: Optional OpenCode configuration for shell execution.
         """
         self.config = config
-        logger.info("Initialized patch applicator")
+        self.opencode_config = opencode_config
+        self.opencode_client = None
+
+        if opencode_config and opencode_config.enable_shell_execution:
+            self.opencode_client = OpenCodeClient(opencode_config)
+
+        logger.info("Initialized patch applicator with OpenCode integration: %s",
+                   bool(self.opencode_client))
 
     def apply_patch(
         self,
@@ -92,7 +105,7 @@ class PatchApplicator:
                 logger.info(f"Created backup: {backup_file}")
 
             # Read current file content
-            with open(target_file, "r", encoding="utf-8") as f:
+            with open(target_file, encoding="utf-8") as f:
                 lines = f.readlines()
 
             # Apply patch by replacing lines
@@ -134,7 +147,7 @@ class PatchApplicator:
     def run_tests(
         self,
         repo_path: str | Path,
-        patch_id: Optional[str] = None,
+        patch_id: str | None = None,
     ) -> TestResult:
         """Execute the configured test suite and return detailed results.
 
@@ -214,7 +227,7 @@ class PatchApplicator:
         self,
         patch: PatchCandidate,
         repo_path: str | Path,
-        baseline_test_result: Optional[TestResult] = None,
+        baseline_test_result: TestResult | None = None,
     ) -> tuple[bool, TestResult]:
         """Apply a patch and immediately run tests to validate the changes.
 
@@ -263,7 +276,7 @@ class PatchApplicator:
     def create_test_environment(
         self,
         repo_path: str | Path,
-        temp_dir: Optional[str | Path] = None,
+        temp_dir: str | Path | None = None,
     ) -> Path:
         """Create an isolated test environment for safe patch validation.
 
@@ -350,7 +363,7 @@ class PatchApplicator:
         self,
         command: str,
         cwd: Path,
-        timeout: Optional[int] = None,
+        timeout: int | None = None,
     ) -> subprocess.CompletedProcess:
         """Execute a shell command with proper error handling and timeout control.
 
@@ -383,7 +396,7 @@ class PatchApplicator:
             logger.debug(f"Command '{command}' completed with exit code {result.returncode}")
             return result
 
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
             logger.error(f"Command '{command}' timed out after {timeout} seconds")
             raise
 
@@ -391,7 +404,7 @@ class PatchApplicator:
             logger.error(f"Failed to run command '{command}': {e}")
             raise
 
-    def _parse_failed_tests(self, output: str) -> List[str]:
+    def _parse_failed_tests(self, output: str) -> list[str]:
         """Extract failed test names from test framework output using pattern matching.
 
         Analyzes test output using regular expressions to identify failed tests
@@ -432,9 +445,9 @@ class PatchApplicator:
 
     def _find_new_failures(
         self,
-        baseline_failures: List[str],
-        current_failures: List[str]
-    ) -> List[str]:
+        baseline_failures: list[str],
+        current_failures: list[str]
+    ) -> list[str]:
         """Identify regression failures by comparing current results with baseline.
 
         Compares the current test failures against a known baseline to identify

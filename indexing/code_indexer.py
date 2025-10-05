@@ -16,11 +16,11 @@ import ast
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+
+from indexing.vector_store import VectorStore
 
 from core.config import VectorDBConfig
 from core.types import CodeContext
-from vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -82,9 +82,9 @@ class CodeIndexer:
     def index_repository(
         self,
         repo_path: str | Path,
-        exclude_patterns: Optional[List[str]] = None,
-        target_files: Optional[List[str]] = None,
-    ) -> List[CodeContext]:
+        exclude_patterns: list[str] | None = None,
+        target_files: list[str] | None = None,
+    ) -> list[CodeContext]:
         """Index all relevant files in a repository."""
         repo_path = Path(repo_path)
         exclude_patterns = exclude_patterns or []
@@ -119,8 +119,8 @@ class CodeIndexer:
         self,
         problem_description: str,
         top_k: int = 10, #TODO: We may need to increase this number
-        file_filter: Optional[str] = None,
-    ) -> List[CodeContext]:
+        file_filter: str | None = None,
+    ) -> list[CodeContext]:
         """Search for code contexts relevant to a problem description."""
         results = self.vector_store.search_similar_contexts(
             query=problem_description,
@@ -131,16 +131,16 @@ class CodeIndexer:
         # Extract just the contexts (without scores)
         return [context for context, _ in results]
 
-    def get_file_context(self, file_path: str) -> List[CodeContext]:
+    def get_file_context(self, file_path: str) -> list[CodeContext]:
         """Get all contexts for a specific file."""
         return self.vector_store.get_context_by_file(file_path)
 
     def _find_code_files(
         self,
         repo_path: Path,
-        exclude_patterns: List[str],
-        target_files: Optional[List[str]] = None,
-    ) -> List[Path]:
+        exclude_patterns: list[str],
+        target_files: list[str] | None = None,
+    ) -> list[Path]:
         """Find all code files in the repository."""
         #TODO: Remove target_files, we should index the entire repository, not just specific files
         if target_files:
@@ -178,7 +178,7 @@ class CodeIndexer:
         self,
         file_path: Path,
         repo_path: Path,
-        exclude_patterns: List[str]
+        exclude_patterns: list[str]
     ) -> bool:
         """Check if a file should be excluded based on patterns."""
         relative_path = file_path.relative_to(repo_path)
@@ -190,10 +190,10 @@ class CodeIndexer:
 
         return False
 
-    def _process_file(self, file_path: Path) -> List[CodeContext]:
+    def _process_file(self, file_path: Path) -> list[CodeContext]:
         """Process a single file and create code contexts."""
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(file_path, encoding="utf-8", errors="ignore") as f:
                 content = f.read()
         except Exception as e:
             logger.warning(f"Failed to read file {file_path}: {e}")
@@ -236,7 +236,7 @@ class CodeIndexer:
         file_path: Path,
         content: str,
         language: str
-    ) -> List[CodeContext]:
+    ) -> list[CodeContext]:
         """Split large file content into smaller chunks."""
         contexts = []
         lines = content.split("\n")
@@ -281,7 +281,7 @@ class CodeIndexer:
 
         return contexts
 
-    def _extract_functions(self, content: str, language: str) -> List[str]:
+    def _extract_functions(self, content: str, language: str) -> list[str]:
         """Extract function names from code content."""
         functions = []
 
@@ -296,7 +296,7 @@ class CodeIndexer:
 
         return functions
 
-    def _extract_python_functions(self, content: str) -> List[str]:
+    def _extract_python_functions(self, content: str) -> list[str]:
         """Extract Python function and class names using AST."""
         functions = []
         try:
@@ -313,7 +313,7 @@ class CodeIndexer:
 
         return functions
 
-    def _extract_js_functions(self, content: str) -> List[str]:
+    def _extract_js_functions(self, content: str) -> list[str]:
         """Extract JavaScript/TypeScript function names using regex."""
         patterns = [
             r"function\s+(\w+)",
@@ -329,7 +329,7 @@ class CodeIndexer:
 
         return functions
 
-    def _extract_java_functions(self, content: str) -> List[str]:
+    def _extract_java_functions(self, content: str) -> list[str]:
         """Extract Java method and class names using regex."""
         patterns = [
             r"class\s+(\w+)",
@@ -344,7 +344,7 @@ class CodeIndexer:
 
         return functions
 
-    def _extract_dependencies(self, content: str, language: str) -> List[str]:
+    def _extract_dependencies(self, content: str, language: str) -> list[str]:
         """Extract import/dependency information from code."""
         dependencies = []
 
@@ -357,7 +357,7 @@ class CodeIndexer:
 
         return dependencies
 
-    def _extract_python_imports(self, content: str) -> List[str]:
+    def _extract_python_imports(self, content: str) -> list[str]:
         """Extract Python import statements."""
         imports = []
         patterns = [
@@ -371,7 +371,7 @@ class CodeIndexer:
 
         return imports
 
-    def _extract_js_imports(self, content: str) -> List[str]:
+    def _extract_js_imports(self, content: str) -> list[str]:
         """Extract JavaScript/TypeScript import statements."""
         patterns = [
             r"import\s+.*?\s+from\s+['\"]([^'\"]+)['\"]",
@@ -385,7 +385,7 @@ class CodeIndexer:
 
         return imports
 
-    def _extract_java_imports(self, content: str) -> List[str]:
+    def _extract_java_imports(self, content: str) -> list[str]:
         """Extract Java import statements."""
         pattern = r"import\s+(?:static\s+)?([^;]+);"
         imports = re.findall(pattern, content)

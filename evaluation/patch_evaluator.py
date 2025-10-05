@@ -14,22 +14,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple
 
-import anthropic
-
-from core.config import EvaluationConfig
+from core.config import EvaluationConfig, OpenCodeConfig
 from core.types import EvaluationResult, PatchCandidate
+from opencode_client import OpenCodeClient
 
 logger = logging.getLogger(__name__)
 
 
 class PatchEvaluator:
-    """Advanced patch evaluation system using Claude for intelligent comparison.
+    """Advanced patch evaluation system using OpenCode's LLM provider management.
 
     This class provides sophisticated evaluation capabilities for comparing patch
-    candidates using Claude's advanced reasoning. It can perform pairwise comparisons,
-    tournament-style evaluations, and detailed analysis of code quality factors.
+    candidates using LLM reasoning through OpenCode SST. It can perform pairwise
+    comparisons, tournament-style evaluations, and detailed analysis of code quality
+    factors while leveraging OpenCode's provider authentication system.
 
     The evaluator considers multiple dimensions when comparing patches:
     - Correctness and bug fixing effectiveness
@@ -40,28 +39,36 @@ class PatchEvaluator:
 
     Attributes:
         config: Evaluation configuration parameters and model settings.
-        claude_client: Async Anthropic client for Claude API communication.
+        opencode_config: OpenCode configuration for LLM provider management.
+        opencode_client: OpenCode client for LLM communication.
+        session_id: Active OpenCode session for evaluation.
     """
 
-    def __init__(self, config: EvaluationConfig, claude_api_key: str) -> None:
-        """Initialize the patch evaluator with Claude-powered comparison capabilities.
+    def __init__(
+        self,
+        config: EvaluationConfig,
+        opencode_config: OpenCodeConfig
+    ) -> None:
+        """Initialize the patch evaluator with OpenCode-powered comparison capabilities.
 
         Args:
             config: Evaluation configuration including model parameters, comparison
                 methodology, and quality thresholds.
-            claude_api_key: API key for Anthropic Claude authentication.
+            opencode_config: OpenCode configuration for LLM provider management.
         """
         self.config = config
-        self.claude_client = anthropic.AsyncAnthropic(api_key=claude_api_key)
+        self.opencode_config = opencode_config
+        self.opencode_client = OpenCodeClient(opencode_config) if opencode_config.enabled else None
+        self.session_id: str | None = None
 
-        logger.info("Initialized patch evaluator with Claude")
+        logger.info("Initialized patch evaluator with OpenCode SST")
 
     async def evaluate_patches_pairwise(
         self,
-        patches: List[PatchCandidate],
+        patches: list[PatchCandidate],
         problem_description: str,
         original_code: str,
-    ) -> List[EvaluationResult]:
+    ) -> list[EvaluationResult]:
         """Perform comprehensive pairwise evaluation of patch candidates using AB testing.
 
         This method conducts systematic pairwise comparisons between all patch
@@ -146,8 +153,18 @@ class PatchEvaluator:
         original_code: str,
     ) -> EvaluationResult:
         """Evaluate a pair of patches and determine the winner."""
+        if not self.opencode_client or not self.session_id:
+            logger.error("No active OpenCode session for patch evaluation")
+            return EvaluationResult(
+                patch_a_id=patch_a.id,
+                patch_b_id=patch_b.id,
+                winner_id=patch_a.id,
+                confidence=0.5,
+                reasoning="No OpenCode session available for evaluation",
+            )
+
         try:
-            system_prompt = self._create_evaluation_system_prompt() 
+            system_prompt = self._create_evaluation_system_prompt()
             user_prompt = self._create_evaluation_user_prompt(
                 patch_a=patch_a,
                 patch_b=patch_b,
@@ -155,17 +172,19 @@ class PatchEvaluator:
                 original_code=original_code,
             )
 
-            #TODO: Force the agent to return a JSON object (also maybe add a schema)
-            response = await self.claude_client.messages.create(
+            # Use OpenCode's LLM provider management
+            response = await self.opencode_client.send_prompt(
+                session_id=self.session_id,
+                prompt=user_prompt,
+                system_prompt=system_prompt,
                 model=self.config.model_name,
-                max_tokens=self.config.max_tokens,
                 temperature=self.config.temperature,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
+                max_tokens=self.config.max_tokens,
+                agent_id="patch_evaluator"
             )
 
             # Parse evaluation response
-            evaluation_result = self._parse_evaluation_response(
+            evaluation_result = self._parse_opencode_evaluation_response(
                 response=response,
                 patch_a=patch_a,
                 patch_b=patch_b,
@@ -254,15 +273,16 @@ Lines {patch_b.line_start}-{patch_b.line_end}:
 Please evaluate these two patches and determine which one better solves the problem. Consider all aspects of code quality, correctness, and maintainability.
         """.strip()
 
-    def _parse_evaluation_response(
+    def _parse_opencode_evaluation_response(
         self,
-        response: anthropic.types.Message,
+        response: dict[str, any],
         patch_a: PatchCandidate,
         patch_b: PatchCandidate,
     ) -> EvaluationResult:
-        """Parse the evaluation response from Claude."""
+        """Parse the evaluation response from OpenCode's LLM."""
         try:
-            content = response.content[0].text if response.content else ""
+            # Extract content from OpenCode response
+            content = response.get("content") or response.get("text") or response.get("response", "")
 
             # Extract JSON from response
             import json
@@ -297,12 +317,14 @@ Please evaluate these two patches and determine which one better solves the prob
                 reasoning=eval_data.get("reasoning", "No reasoning provided"),
                 metadata={
                     "evaluator_model": self.config.model_name,
+                    "opencode_session": self.session_id,
                     "raw_response": content,
+                    "opencode_response": response,
                 },
             )
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.error(f"Failed to parse evaluation response: {e}")
+            logger.error(f"Failed to parse OpenCode evaluation response: {e}")
             # Return default result
             return EvaluationResult(
                 patch_a_id=patch_a.id,
@@ -312,13 +334,38 @@ Please evaluate these two patches and determine which one better solves the prob
                 reasoning=f"Failed to parse evaluation response: {e}",
             )
 
+    def _parse_evaluation_response(
+        self,
+        response: any,  # Kept for backward compatibility
+        patch_a: PatchCandidate,
+        patch_b: PatchCandidate,
+    ) -> EvaluationResult:
+        """Legacy method for backward compatibility."""
+        logger.warning("Using deprecated _parse_evaluation_response, use _parse_opencode_evaluation_response instead")
+        return EvaluationResult(
+            patch_a_id=patch_a.id,
+            patch_b_id=patch_b.id,
+            winner_id=patch_a.id,
+            confidence=0.5,
+            reasoning="Legacy evaluation method used",
+        )
+
+    def set_session_id(self, session_id: str) -> None:
+        """Set the OpenCode session ID for evaluation.
+
+        Args:
+            session_id: OpenCode session ID to use for evaluation.
+        """
+        self.session_id = session_id
+        logger.debug(f"PatchEvaluator assigned to session {session_id}")
+
     async def find_best_patch(
         self,
-        patches: List[PatchCandidate],
+        patches: list[PatchCandidate],
         problem_description: str,
         original_code: str,
-        min_comparisons: Optional[int] = None,
-    ) -> Optional[PatchCandidate]:
+        min_comparisons: int | None = None,
+    ) -> PatchCandidate | None:
         """Find the best patch using tournament-style evaluation."""
         if not patches:
             return None
@@ -376,7 +423,7 @@ Please evaluate these two patches and determine which one better solves the prob
 
         return best_patch
 
-    def get_evaluation_stats(self, evaluation_results: List[EvaluationResult]) -> Dict[str, any]:
+    def get_evaluation_stats(self, evaluation_results: list[EvaluationResult]) -> dict[str, any]:
         """Get statistics about evaluation results."""
         if not evaluation_results:
             return {"total_evaluations": 0}

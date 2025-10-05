@@ -1,27 +1,25 @@
 """Orchestration system for coordinating multiple AI agents in parallel.
 
 This module implements the core orchestration logic for managing multiple
-Claude-powered agents working together on patch generation. It handles agent
-initialization, parallel execution, result aggregation, and resource management
-within the OpenCode SST framework.
+Claude-powered agents working together on patch generation. It leverages
+OpenCode SST sessions for proper agent isolation, resource management,
+and coordinated execution instead of custom orchestration.
 
-The orchestrator enables diverse solution generation by running multiple agents
-with different specializations simultaneously, then collecting and managing
-their patch candidates for downstream evaluation.
+The orchestrator creates isolated OpenCode sessions for each agent, enabling
+proper resource management and leveraging OpenCode's built-in capabilities
+for session management and execution coordination.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, List, Optional
 
-import anthropic
-
-from core.config import Config, OpenCodeConfig
+from agents.opencode_agent import OpenCodeAgent
+from core.config import Config
 from core.types import AgentConfig, CodeContext, PatchCandidate
 from indexing import CodeIndexer
-from agents.opencode_agent import OpenCodeAgent
+from opencode_client import OpenCodeClient, OpenCodeSession
 
 logger = logging.getLogger(__name__)
 
@@ -30,43 +28,48 @@ class AgentOrchestrator:
     """Coordinates parallel execution of multiple AI agents for patch generation.
 
     This class manages the lifecycle and execution of multiple specialized AI agents
-    working together to generate diverse patch candidates. It handles agent creation,
-    parallel task execution, resource limiting, and result aggregation within the
-    OpenCode SST framework.
+    working together to generate diverse patch candidates. It leverages OpenCode SST
+    sessions for proper agent isolation and resource management, replacing custom
+    orchestration with OpenCode's proven infrastructure.
 
-    The orchestrator supports different agent specializations and ensures efficient
-    resource utilization while maximizing solution diversity through parallel execution.
+    Each agent operates within its own OpenCode session, enabling proper isolation,
+    resource tracking, and coordinated execution through OpenCode's session management.
+    LLM provider authentication is handled by OpenCode's auth system.
 
     Attributes:
         config: Main system configuration containing agent definitions.
         opencode_config: OpenCode SST specific configuration parameters.
         agents: List of initialized OpenCode agents ready for execution.
-        claude_client: Shared Anthropic client for all agents.
+        opencode_client: OpenCode SST client for session management.
+        active_sessions: Dictionary of active OpenCode sessions by agent ID.
     """
 
     def __init__(self, config: Config) -> None:
         """Initialize the agent orchestrator with system configuration.
 
-        Sets up the Anthropic client, initializes all configured agents, and
-        prepares the orchestration infrastructure for parallel patch generation.
+        Sets up the OpenCode client, initializes all configured agents, and
+        prepares the session-based orchestration infrastructure. LLM provider
+        authentication is managed through OpenCode's auth system.
 
         Args:
-            config: Complete system configuration including agent definitions,
-                API credentials, and orchestration parameters.
+            config: Complete system configuration including agent definitions
+                and orchestration parameters.
         """
         self.config = config
         self.opencode_config = config.opencode
-        self.agents: List[OpenCodeAgent] = []
+        self.agents: list[OpenCodeAgent] = []
+        self.active_sessions: dict[str, OpenCodeSession] = {}
 
-        # Initialize Claude client
-        self.claude_client = anthropic.AsyncAnthropic(
-            api_key=config.claude_api_key
-        )
+        # Initialize OpenCode client if enabled
+        if self.opencode_config.enabled:
+            self.opencode_client = OpenCodeClient(self.opencode_config)
+        else:
+            self.opencode_client = None
 
         # Initialize agents
         self._initialize_agents()
 
-        logger.info(f"Initialized orchestrator with {len(self.agents)} agents")
+        logger.info(f"Initialized orchestrator with {len(self.agents)} agents using OpenCode SST")
 
     def _initialize_agents(self) -> None:
         """Initialize all configured agents."""
@@ -74,7 +77,6 @@ class AgentOrchestrator:
             agent = OpenCodeAgent(
                 agent_config=agent_config,
                 opencode_config=self.opencode_config,
-                claude_client=self.claude_client,
             )
             self.agents.append(agent)
 
@@ -82,86 +84,99 @@ class AgentOrchestrator:
         self,
         problem_description: str,
         code_indexer: CodeIndexer,
-        target_files: Optional[List[str]] = None,
-    ) -> List[PatchCandidate]:
-        """Generate patch candidates using all agents."""
+        target_files: list[str] | None = None,
+    ) -> list[PatchCandidate]:
+        """Generate patch candidates using all agents with OpenCode session management."""
         logger.info("Starting patch generation with all agents")
 
-        # Get relevant code contexts
-        relevant_contexts = code_indexer.search_relevant_context(
-            problem_description=problem_description,
-            top_k=10 #TODO: We may need to increase this number
-        )
-
-        if not relevant_contexts:
-            logger.warning("No relevant code contexts found")
-            return []
-
-        # Determine target files
-        if not target_files:
-            target_files = list(set(ctx.file_path for ctx in relevant_contexts))
-
-        logger.info(f"Generating patches for {len(target_files)} files")
-
-        # Generate patches for each file using all agents
-        all_patches = []
-        tasks = []
-
-        #TODO: Evaluate if this logic makes sense. Each agent generates a solution for a single file.
-        for target_file in target_files:
-            # Get contexts specific to this file
-            file_contexts = [ctx for ctx in relevant_contexts if ctx.file_path == target_file]
-
-            # Create tasks for each agent to generate patches for this file
-            for agent in self.agents:
-                task = self._generate_patch_with_agent(
-                    agent=agent,
-                    problem_description=problem_description,
-                    relevant_contexts=file_contexts,
-                    target_file=target_file,
-                )
-                tasks.append(task)
-
-        # Execute all tasks with concurrency limit
-        semaphore = asyncio.Semaphore(self.opencode_config.max_parallel_agents)
-
-        async def bounded_task(task):
-            async with semaphore:
-                return await task
-
-        # Run tasks with timeout
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*[bounded_task(task) for task in tasks], return_exceptions=True),
-                timeout=self.opencode_config.timeout_seconds
+        # Initialize OpenCode sessions if enabled
+        if self.opencode_config.use_sessions and self.opencode_client:
+            await self._initialize_agent_sessions(
+                problem_description=problem_description,
+                repository_path=self.config.repository_path
             )
 
-            # Collect successful patches
-            for result in results:
-                if isinstance(result, PatchCandidate):
-                    all_patches.append(result)
-                elif isinstance(result, Exception):
-                    logger.error(f"Agent task failed: {result}")
+        try:
+            # Get relevant code contexts
+            relevant_contexts = code_indexer.search_relevant_context(
+                problem_description=problem_description,
+                top_k=10  # TODO: We may need to increase this number
+            )
 
-        except asyncio.TimeoutError:
-            logger.error(f"Patch generation timed out after {self.opencode_config.timeout_seconds}s")
+            if not relevant_contexts:
+                logger.warning("No relevant code contexts found")
+                return []
 
-        # Sort patches by confidence score
-        all_patches.sort(key=lambda p: p.confidence_score, reverse=True)
+            # Determine target files
+            if not target_files:
+                target_files = list(set(ctx.file_path for ctx in relevant_contexts))
 
-        # Limit to requested number of candidates
-        final_patches = all_patches[:self.config.num_patch_candidates]
+            logger.info(f"Generating patches for {len(target_files)} files")
 
-        logger.info(f"Generated {len(final_patches)} patch candidates")
-        return final_patches
+            # Generate patches for each file using all agents
+            all_patches = []
+            tasks = []
+
+            # TODO: Evaluate if this logic makes sense. Each agent generates a solution for a single file.
+            for target_file in target_files:
+                # Get contexts specific to this file
+                file_contexts = [ctx for ctx in relevant_contexts if ctx.file_path == target_file]
+
+                # Create tasks for each agent to generate patches for this file
+                for agent in self.agents:
+                    task = self._generate_patch_with_agent(
+                        agent=agent,
+                        problem_description=problem_description,
+                        relevant_contexts=file_contexts,
+                        target_file=target_file,
+                    )
+                    tasks.append(task)
+
+            # Execute all tasks with concurrency limit
+            max_parallel = self.opencode_config.max_parallel_sessions
+            semaphore = asyncio.Semaphore(max_parallel)
+
+            async def bounded_task(task):
+                async with semaphore:
+                    return await task
+
+            # Run tasks with timeout
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*[bounded_task(task) for task in tasks], return_exceptions=True),
+                    timeout=self.opencode_config.session_timeout_seconds
+                )
+
+                # Collect successful patches
+                for result in results:
+                    if isinstance(result, PatchCandidate):
+                        all_patches.append(result)
+                    elif isinstance(result, Exception):
+                        logger.error(f"Agent task failed: {result}")
+
+            except TimeoutError:
+                logger.error(f"Patch generation timed out after {self.opencode_config.session_timeout_seconds}s")
+
+            # Sort patches by confidence score
+            all_patches.sort(key=lambda p: p.confidence_score, reverse=True)
+
+            # Limit to requested number of candidates
+            final_patches = all_patches[:self.config.num_patch_candidates]
+
+            logger.info(f"Generated {len(final_patches)} patch candidates")
+            return final_patches
+
+        finally:
+            # Clean up OpenCode sessions
+            await self._cleanup_agent_sessions()
 
     async def _generate_patch_with_agent(
         self,
         agent: OpenCodeAgent,
         problem_description: str,
-        relevant_contexts: List[CodeContext],
+        relevant_contexts: list[CodeContext],
         target_file: str,
-    ) -> Optional[PatchCandidate]:
+    ) -> PatchCandidate | None:
         """Generate a patch using a specific agent."""
         try:
             return await agent.generate_patch(
@@ -177,9 +192,9 @@ class AgentOrchestrator:
         self,
         problem_description: str,
         code_indexer: CodeIndexer,
-        target_files: Optional[List[str]] = None,
-        diversity_factor: float = 0.3,
-    ) -> List[PatchCandidate]:
+        target_files: list[str] | None = None,
+        diversity_factor: float = 0.3,  # noqa: ARG002
+    ) -> list[PatchCandidate]:
         """Generate diverse patch candidates by varying agent parameters."""
         logger.info("Generating diverse patches with parameter variation")
 
@@ -247,7 +262,7 @@ class AgentOrchestrator:
         logger.info(f"Generated {len(final_diverse_patches)} diverse patch candidates")
         return final_diverse_patches
 
-    def _deduplicate_patches(self, patches: List[PatchCandidate]) -> List[PatchCandidate]:
+    def _deduplicate_patches(self, patches: list[PatchCandidate]) -> list[PatchCandidate]:
         """Remove duplicate patches based on content similarity."""
         unique_patches = []
         seen_contents = set()
@@ -262,7 +277,7 @@ class AgentOrchestrator:
 
         return unique_patches
 
-    async def validate_patches(self, patches: List[PatchCandidate]) -> List[PatchCandidate]:
+    async def validate_patches(self, patches: list[PatchCandidate]) -> list[PatchCandidate]:
         """Validate patch candidates for syntax and basic correctness."""
         validated_patches = []
 
@@ -295,14 +310,70 @@ class AgentOrchestrator:
         logger.info(f"Validated {len(validated_patches)} out of {len(patches)} patches")
         return validated_patches
 
-    def get_orchestrator_stats(self) -> Dict[str, any]:
+    async def _initialize_agent_sessions(
+        self,
+        problem_description: str,
+        repository_path: str
+    ) -> None:
+        """Initialize OpenCode sessions for each agent.
+
+        Args:
+            problem_description: Description of the problem to solve.
+            repository_path: Path to the repository being worked on.
+        """
+        if not self.opencode_client:
+            return
+
+        for agent in self.agents:
+            try:
+                session = await self.opencode_client.initialize_session_for_repository(
+                    repository_path=repository_path,
+                    problem_description=problem_description
+                )
+                session.metadata.update({
+                    "agent_id": agent.agent_config.agent_id,
+                    "specialized_role": agent.agent_config.specialized_role
+                })
+                self.active_sessions[agent.agent_config.agent_id] = session
+
+                # Assign session ID to the agent
+                agent.set_session_id(session.session_id)
+
+                logger.info(f"Initialized session {session.session_id} for agent {agent.agent_config.agent_id}")
+
+            except Exception as e:
+                logger.error(f"Failed to initialize session for agent {agent.agent_config.agent_id}: {e}")
+
+    async def _cleanup_agent_sessions(self) -> None:
+        """Clean up all active OpenCode sessions."""
+        if not self.opencode_client or not self.active_sessions:
+            return
+
+        for agent_id, session in self.active_sessions.items():
+            try:
+                await self.opencode_client.delete_session(session.session_id)
+                logger.info(f"Cleaned up session for agent {agent_id}")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup session for agent {agent_id}: {e}")
+
+        self.active_sessions.clear()
+
+    def get_orchestrator_stats(self) -> dict[str, any]:
         """Get statistics about the orchestrator and its agents."""
         agent_stats = [agent.get_agent_stats() for agent in self.agents]
 
-        return {
+        stats = {
             "total_agents": len(self.agents),
-            "max_parallel_agents": self.opencode_config.max_parallel_agents,
-            "timeout_seconds": self.opencode_config.timeout_seconds,
             "target_patch_candidates": self.config.num_patch_candidates,
             "agents": agent_stats,
+            "opencode_integration": {
+                "sessions_enabled": self.opencode_config.use_sessions,
+                "max_parallel_sessions": self.opencode_config.max_parallel_sessions,
+                "session_timeout_seconds": self.opencode_config.session_timeout_seconds,
+                "active_sessions": len(self.active_sessions),
+                "shell_execution_enabled": self.opencode_config.enable_shell_execution,
+                "code_analysis_enabled": self.opencode_config.enable_code_analysis,
+            }
         }
+
+        return stats

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -58,21 +57,45 @@ class OpenCodeConfig(BaseModel):
     This configuration controls the integration with OpenCode SST framework
     for managing multiple AI agents in parallel during patch generation.
     OpenCode SST provides the infrastructure for coordinating autonomous
-    agents working on the same problem.
+    agents working on the same problem through session-based workflows.
+
+    OpenCode manages LLM provider authentication and API calls, eliminating
+    the need for direct LLM API management in our codebase.
 
     Attributes:
         enabled: Whether to use OpenCode SST for agent orchestration.
+        server_host: OpenCode SST server hostname.
+        server_port: OpenCode SST server port.
         base_url: Optional custom OpenCode SST service endpoint.
-        api_key: Optional API key for OpenCode SST authentication. #TODO: Check if this is needed
-        max_parallel_agents: Maximum number of agents to run simultaneously.
-        timeout_seconds: Maximum time allowed for patch generation per agent.
+        use_sessions: Whether to use OpenCode's session management for agents.
+        session_timeout_seconds: Maximum time allowed for session execution.
+        max_parallel_sessions: Maximum number of concurrent OpenCode sessions.
+        enable_shell_execution: Whether to use OpenCode's shell execution for tests.
+        enable_code_analysis: Whether to use OpenCode's built-in code analysis.
+        enable_event_streaming: Whether to enable OpenCode's real-time event streaming.
+        provider_name: LLM provider to use ("anthropic", "openai", "opencode").
+        use_provider_auth: Whether to use OpenCode's provider authentication system.
     """
 
     enabled: bool = True
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
-    max_parallel_agents: int = 4
-    timeout_seconds: int = 300
+    server_host: str = "127.0.0.1"
+    server_port: int = 4096
+    base_url: str | None = None
+    use_sessions: bool = True
+    session_timeout_seconds: int = 600
+    max_parallel_sessions: int = 4
+    enable_shell_execution: bool = True
+    enable_code_analysis: bool = True
+    enable_event_streaming: bool = True
+    provider_name: str = "anthropic"
+    use_provider_auth: bool = True
+
+    @property
+    def server_url(self) -> str:
+        """Get the complete OpenCode SST server URL."""
+        if self.base_url:
+            return self.base_url
+        return f"http://{self.server_host}:{self.server_port}"
 
 
 class EvaluationConfig(BaseModel):
@@ -107,9 +130,9 @@ class TestingConfig(BaseModel):
 
     test_command: str = "pytest"
     test_timeout_seconds: int = 300
-    pre_test_commands: List[str] = Field(default_factory=list)
-    post_test_commands: List[str] = Field(default_factory=list)
-    required_coverage: Optional[float] = None
+    pre_test_commands: list[str] = Field(default_factory=list)
+    post_test_commands: list[str] = Field(default_factory=list)
+    required_coverage: float | None = None
     fail_on_regression: bool = True
 
 
@@ -131,15 +154,15 @@ class Config(BaseModel):
     # Repository settings
     repository_path: str = Field(description="Path to the target repository")
     problem_description: str = Field(description="Description of the bug/issue to fix")
-    target_files: Optional[List[str]] = Field(
+    target_files: list[str] | None = Field(
         default=None, description="Specific files to focus on (optional)"
     )
-    exclude_patterns: List[str] = Field(
+    exclude_patterns: list[str] = Field(
         default_factory=lambda: ["*.pyc", "__pycache__", ".git", "node_modules"]
     )
 
     # Agent configuration
-    agents: List[AgentConfig] = Field(description="List of agent configurations")
+    agents: list[AgentConfig] = Field(description="List of agent configurations")
     num_patch_candidates: int = Field(default=10, gt=0)
 
     # Component configurations
@@ -149,9 +172,8 @@ class Config(BaseModel):
     testing: TestingConfig = Field(default_factory=TestingConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
-    # Claude API settings
-    claude_api_key: Optional[str] = None
-    claude_base_url: Optional[str] = None
+    # Note: LLM API keys are now managed through OpenCode's auth system
+    # Run `opencode auth login` to configure your LLM provider
 
     @field_validator("repository_path")
     @classmethod
@@ -166,7 +188,7 @@ class Config(BaseModel):
 
     @field_validator("agents")
     @classmethod
-    def validate_agents(cls, v: List[AgentConfig]) -> List[AgentConfig]:
+    def validate_agents(cls, v: list[AgentConfig]) -> list[AgentConfig]:
         """Validate that at least one agent is configured."""
         if not v:
             raise ValueError("At least one agent must be configured")
@@ -188,7 +210,7 @@ def load_config(config_path: str | Path) -> Config:
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         #TODO: Use only one, yaml or json
         if config_path.suffix.lower() in [".yaml", ".yml"]:
             data = yaml.safe_load(f)

@@ -14,10 +14,9 @@ from core.types import (
 )
 
 __all__ = [
-    "Config",
-    "load_config",
     "AgentConfig",
     "CodeContext",
+    "Config",
     "EloRating",
     "EvaluationMethod",
     "EvaluationResult",
@@ -25,4 +24,5 @@ __all__ = [
     "PatchCandidate",
     "PatchStatus",
     "TestResult",
+    "load_config",
 ]

@@ -11,73 +11,66 @@ address the identified issues.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
-from typing import Dict, List, Optional
-
-import anthropic
 
 from core.config import OpenCodeConfig
 from core.types import AgentConfig, CodeContext, PatchCandidate
+from opencode_client import OpenCodeClient
 
 logger = logging.getLogger(__name__)
 
 
 class OpenCodeAgent:
-    """Autonomous AI agent for generating code patch candidates using Claude.
+    """Autonomous AI agent for generating code patch candidates through OpenCode SST.
 
     This class represents a single AI agent that operates within the OpenCode SST
-    framework to generate patch proposals for code issues. Each agent can have
-    different specializations, model parameters, and prompting strategies to
-    encourage solution diversity.
+    framework to generate patch proposals for code issues. OpenCode manages the
+    LLM provider authentication and routing, eliminating direct API management.
 
-    The agent operates asynchronously and can work in parallel with other agents
-    on the same problem, contributing to a pool of candidate solutions that are
-    later evaluated and ranked.
+    Each agent can have different specializations, model parameters, and prompting
+    strategies to encourage solution diversity while leveraging OpenCode's session
+    management and provider integration.
 
     Attributes:
         agent_config: Configuration parameters for this specific agent.
         opencode_config: OpenCode SST framework configuration.
-        client: Async Anthropic client for Claude API communication.
+        opencode_client: OpenCode client for session and LLM communication.
+        session_id: Active OpenCode session ID for this agent.
     """
 
     def __init__(
         self,
         agent_config: AgentConfig,
         opencode_config: OpenCodeConfig,
-        claude_client: anthropic.AsyncAnthropic,
     ) -> None:
-        """Initialize the Claude-powered patch generation agent.
+        """Initialize the OpenCode-powered patch generation agent.
 
         Args:
             agent_config: Individual agent configuration including model settings,
                 specialized role, and behavioral parameters.
             opencode_config: OpenCode SST framework configuration for orchestration.
-            claude_client: Pre-configured async Anthropic client for API calls.
         """
         self.agent_config = agent_config
         self.opencode_config = opencode_config
-        self.client = claude_client
+        self.opencode_client = OpenCodeClient(opencode_config) if opencode_config.enabled else None
+        self.session_id: str | None = None
 
-        logger.info(f"Initialized Claude agent {agent_config.agent_id}")
+        logger.info(f"Initialized OpenCode agent {agent_config.agent_id}")
 
     async def generate_patch(
         self,
         problem_description: str,
-        relevant_contexts: List[CodeContext],
+        relevant_contexts: list[CodeContext],
         target_file: str,
-    ) -> Optional[PatchCandidate]:
+    ) -> PatchCandidate | None:
         """Generate a patch candidate to address a specific code problem.
 
-        This method orchestrates the entire patch generation process for this agent.
-        It formats the provided code context, creates specialized prompts based on
-        the agent's role, queries Claude for a solution, and parses the response
-        into a structured patch candidate.
-
-        The agent uses its specialized role (e.g., security, performance, general)
-        to focus on different aspects of the problem and propose diverse solutions.
+        This method orchestrates the entire patch generation process for this agent
+        using OpenCode's LLM provider management. It formats the provided code context,
+        creates specialized prompts based on the agent's role, queries the LLM through
+        OpenCode, and parses the response into a structured patch candidate.
 
         Args:
             problem_description: Human-readable description of the issue to fix.
@@ -89,8 +82,12 @@ class OpenCodeAgent:
             agent was unable to generate a valid solution.
 
         Raises:
-            Exception: If Claude API communication fails or response parsing errors.
+            Exception: If OpenCode communication fails or response parsing errors.
         """
+        if not self.opencode_client or not self.session_id:
+            logger.error(f"Agent {self.agent_config.agent_id} has no active OpenCode session")
+            return None
+
         try:
             # Prepare context for the agent
             context_text = self._format_contexts(relevant_contexts)
@@ -101,21 +98,19 @@ class OpenCodeAgent:
                 problem_description, context_text, target_file
             )
 
-            # Generate patch using Claude
-
-            #TODO: Force the agent to return a JSON object (also maybe add a schema)
-            response = await self.client.messages.create(
+            # Generate patch using OpenCode's LLM provider management
+            response = await self.opencode_client.send_prompt(
+                session_id=self.session_id,
+                prompt=user_prompt,
+                system_prompt=system_prompt,
                 model=self.agent_config.model_name,
-                max_tokens=self.agent_config.max_tokens,
                 temperature=self.agent_config.temperature,
-                system=system_prompt,
-                messages=[
-                    {"role": "user", "content": user_prompt}
-                ],
+                max_tokens=self.agent_config.max_tokens,
+                agent_id=self.agent_config.agent_id
             )
 
             # Parse response to extract patch
-            patch = self._parse_patch_response(response, target_file)
+            patch = self._parse_opencode_response(response, target_file)
 
             if patch:
                 logger.info(f"Agent {self.agent_config.agent_id} generated patch for {target_file}")
@@ -127,6 +122,15 @@ class OpenCodeAgent:
         except Exception as e:
             logger.error(f"Agent {self.agent_config.agent_id} failed to generate patch: {e}")
             return None
+
+    def set_session_id(self, session_id: str) -> None:
+        """Set the OpenCode session ID for this agent.
+
+        Args:
+            session_id: OpenCode session ID to associate with this agent.
+        """
+        self.session_id = session_id
+        logger.debug(f"Agent {self.agent_config.agent_id} assigned to session {session_id}")
 
     def _create_system_prompt(self) -> str:
         """Create system prompt based on agent configuration."""
@@ -206,7 +210,7 @@ issue described while ensuring the solution is robust and doesn't break existing
 Respond with a JSON object containing the patch information as specified in the system prompt.
         """.strip()
 
-    def _format_contexts(self, contexts: List[CodeContext]) -> str:
+    def _format_contexts(self, contexts: list[CodeContext]) -> str:
         """Format code contexts for inclusion in prompt."""
         if not contexts:
             return "No relevant context available."
@@ -225,19 +229,21 @@ Dependencies: {', '.join(context.dependencies) if context.dependencies else 'Non
 
         return "\n\n".join(formatted_contexts)
 
-    def _parse_patch_response(
+    def _parse_opencode_response(
         self,
-        response: anthropic.types.Message,
+        response: dict[str, any],
         target_file: str,
-    ) -> Optional[PatchCandidate]:
-        """Parse the agent's response to extract patch information."""
+    ) -> PatchCandidate | None:
+        """Parse OpenCode's LLM response to extract patch information."""
         try:
-            content = response.content[0].text if response.content else ""
+            # OpenCode response format may vary, adapt as needed
+            # Assuming response has 'content' or 'text' field with LLM output
+            content = response.get("content") or response.get("text") or response.get("response", "")
             if not content:
+                logger.error("No content found in OpenCode response")
                 return None
 
             # Try to extract JSON from the response
-            #TODO: This shouldnt be needed, we should force the agent to return a JSON object
             json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
             if json_match:
                 patch_data = json.loads(json_match.group(1))
@@ -247,7 +253,7 @@ Dependencies: {', '.join(context.dependencies) if context.dependencies else 'Non
                 if json_match:
                     patch_data = json.loads(json_match.group(0))
                 else:
-                    logger.error("No valid JSON found in response")
+                    logger.error("No valid JSON found in OpenCode response")
                     return None
 
             # Validate required fields
@@ -270,16 +276,27 @@ Dependencies: {', '.join(context.dependencies) if context.dependencies else 'Non
                     "model": self.agent_config.model_name,
                     "temperature": self.agent_config.temperature,
                     "specialized_role": self.agent_config.specialized_role,
+                    "opencode_session": self.session_id,
                     "raw_response": content,
+                    "opencode_response": response,
                 },
             )
 
             return patch
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.error(f"Failed to parse patch response: {e}")
-            logger.debug(f"Raw response: {content}")
+            logger.error(f"Failed to parse OpenCode response: {e}")
+            logger.debug(f"Raw response: {response}")
             return None
+
+    def _parse_patch_response(
+        self,
+        response: any,  # Kept for backward compatibility
+        target_file: str,
+    ) -> PatchCandidate | None:
+        """Legacy method for backward compatibility."""
+        logger.warning("Using deprecated _parse_patch_response, use _parse_opencode_response instead")
+        return None
 
     async def validate_patch_syntax(
         self,
@@ -305,7 +322,7 @@ Dependencies: {', '.join(context.dependencies) if context.dependencies else 'Non
             logger.warning(f"Syntax validation failed for patch {patch.id}: {e}")
             return False
 
-    def get_agent_stats(self) -> Dict[str, any]:
+    def get_agent_stats(self) -> dict[str, any]:
         """Get statistics about this agent's performance."""
         return {
             "agent_id": self.agent_config.agent_id,

@@ -20,8 +20,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -104,7 +103,7 @@ class PatchCandidate(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0, description="Agent confidence")
     status: PatchStatus = Field(default=PatchStatus.GENERATED)
     created_at: datetime = Field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class EvaluationResult(BaseModel):
@@ -134,7 +133,7 @@ class EvaluationResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: str
     evaluation_time: datetime = Field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class EloRating(BaseModel):
@@ -200,13 +199,13 @@ class ExperimentMetadata(BaseModel):
     num_agents: int
     num_patches_generated: int
     evaluation_method: EvaluationMethod
-    winning_patch_id: Optional[str] = None
+    winning_patch_id: str | None = None
     start_time: datetime = Field(default_factory=datetime.now)
-    end_time: Optional[datetime] = None
-    total_duration_seconds: Optional[float] = None
+    end_time: datetime | None = None
+    total_duration_seconds: float | None = None
     success: bool = False
-    error_message: Optional[str] = None
-    test_results: Dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = None
+    test_results: dict[str, Any] = Field(default_factory=dict)
 
 
 class CodeContext(BaseModel):
@@ -233,9 +232,9 @@ class CodeContext(BaseModel):
     file_path: str
     content: str
     language: str
-    embedding: Optional[List[float]] = None
-    relevant_functions: List[str] = Field(default_factory=list)
-    dependencies: List[str] = Field(default_factory=list)
+    embedding: list[float] | None = None
+    relevant_functions: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
 
 
 class AgentConfig(BaseModel):
@@ -264,7 +263,7 @@ class AgentConfig(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=2048, gt=0)
     system_prompt: str = ""
-    specialized_role: Optional[str] = None
+    specialized_role: str | None = None
 
 
 class TestResult(BaseModel):
@@ -296,6 +295,6 @@ class TestResult(BaseModel):
     stderr: str
     duration_seconds: float
     passed: bool
-    failed_tests: List[str] = Field(default_factory=list)
-    new_failures: List[str] = Field(default_factory=list)
+    failed_tests: list[str] = Field(default_factory=list)
+    new_failures: list[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
