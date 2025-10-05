@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from agents import AgentOrchestrator
-from core import Config, EvaluationMethod, ExperimentMetadata, PatchStatus, TestResult
+from core import Config, ExperimentMetadata, PatchStatus, TestResult
 from evaluation import EloRanker, PatchEvaluator
 from experiment_logging import ExperimentLogger, ReportGenerator
 from indexing import CodeIndexer
@@ -75,15 +75,11 @@ class AgenticCodeFixer:
 
         # Initialize components
         self.code_indexer = CodeIndexer(config.vectordb, config.opencode)
-        self.agent_orchestrator = AgentOrchestrator(config)
-        self.patch_evaluator = PatchEvaluator(
-            config.evaluation,
-            config.opencode
-        )
+        self.agent_orchestrator = AgentOrchestrator(config, self.code_indexer)
+        self.patch_evaluator = PatchEvaluator(config.evaluation, config.opencode)
         self.patch_applicator = PatchApplicator(config.testing, config.opencode)
         self.elo_ranker = EloRanker(
-            k_factor=config.evaluation.elo_k_factor,
-            initial_rating=1200.0
+            k_factor=config.evaluation.elo_k_factor, initial_rating=1200.0
         )
 
         # Initialize experiment metadata
@@ -97,15 +93,18 @@ class AgenticCodeFixer:
 
         # Initialize experiment logger
         self.experiment_logger = ExperimentLogger(
-            config.logging,
-            self.experiment_metadata.experiment_id
+            config.logging, self.experiment_metadata.experiment_id
         )
 
         # Initialize patch manager
-        patch_storage_dir = config.get_output_dir() / self.experiment_metadata.experiment_id / "patches"
+        patch_storage_dir = (
+            config.get_output_dir() / self.experiment_metadata.experiment_id / "patches"
+        )
         self.patch_manager = PatchManager(patch_storage_dir)
 
-        logger.info(f"Initialized Agentic Code Fixer for experiment {self.experiment_metadata.experiment_id}")
+        logger.info(
+            f"Initialized Agentic Code Fixer for experiment {self.experiment_metadata.experiment_id}"
+        )
 
     async def run_experiment(self) -> ExperimentMetadata:
         """Execute the complete automated code fixing experiment workflow.
@@ -155,7 +154,9 @@ class AgenticCodeFixer:
             # Update experiment metadata
             end_time = datetime.now()
             self.experiment_metadata.end_time = end_time
-            self.experiment_metadata.total_duration_seconds = (end_time - start_time).total_seconds()
+            self.experiment_metadata.total_duration_seconds = (
+                end_time - start_time
+            ).total_seconds()
             self.experiment_metadata.winning_patch_id = winning_patch.id
             self.experiment_metadata.success = test_result.passed
             self.experiment_metadata.test_results = test_result.model_dump()
@@ -168,7 +169,9 @@ class AgenticCodeFixer:
             # Handle experiment failure
             end_time = datetime.now()
             self.experiment_metadata.end_time = end_time
-            self.experiment_metadata.total_duration_seconds = (end_time - start_time).total_seconds()
+            self.experiment_metadata.total_duration_seconds = (
+                end_time - start_time
+            ).total_seconds()
             self.experiment_metadata.success = False
             self.experiment_metadata.error_message = str(e)
 
@@ -186,7 +189,9 @@ class AgenticCodeFixer:
         """
         self.experiment_logger.log_info("Starting codebase indexing...")
 
-        with self.experiment_logger.create_progress_context("Indexing codebase...") as progress:
+        with self.experiment_logger.create_progress_context(
+            "Indexing codebase..."
+        ) as progress:
             task = progress.add_task("Indexing files...")
 
             contexts = await self.code_indexer.index_repository(
@@ -209,13 +214,19 @@ class AgenticCodeFixer:
         if self.code_indexer.is_repository_indexed():
             # Check if we need to reindex due to changes
             if self.code_indexer.needs_reindexing(self.config.repository_path):
-                self.experiment_logger.log_info("Repository has changes, re-indexing...")
+                self.experiment_logger.log_info(
+                    "Repository has changes, re-indexing..."
+                )
                 await self._index_codebase()
             else:
-                self.experiment_logger.log_info("Repository already indexed, skipping indexing")
+                self.experiment_logger.log_info(
+                    "Repository already indexed, skipping indexing"
+                )
                 logger.info("Skipping codebase indexing - already up to date")
         else:
-            self.experiment_logger.log_info("Repository not indexed, performing initial indexing...")
+            self.experiment_logger.log_info(
+                "Repository not indexed, performing initial indexing..."
+            )
             await self._index_codebase()
 
     async def _generate_patches(self) -> list:
@@ -233,8 +244,7 @@ class AgenticCodeFixer:
 
         patches = await self.agent_orchestrator.generate_patches(
             problem_description=self.config.problem_description,
-            code_indexer=self.code_indexer,
-            target_files=self.config.target_files, #TODO: Remove target_files
+            target_files=self.config.target_files,  # TODO: Remove target_files
         )
 
         # Store patches in patch manager
@@ -264,7 +274,9 @@ class AgenticCodeFixer:
             evaluation fails to identify a clear winner.
         """
         if len(patches) < 2:
-            self.experiment_logger.log_warning("Insufficient patches for evaluation, returning highest confidence patch")
+            self.experiment_logger.log_warning(
+                "Insufficient patches for evaluation, returning highest confidence patch"
+            )
             return max(patches, key=lambda p: p.confidence_score) if patches else None
 
         self.experiment_logger.log_evaluation_start(len(patches), "elo_tournament")
@@ -274,7 +286,7 @@ class AgenticCodeFixer:
             try:
                 eval_session = await self.patch_evaluator.opencode_client.initialize_session_for_repository(
                     repository_path=self.config.repository_path,
-                    problem_description=f"Patch evaluation: {self.config.problem_description}"
+                    problem_description=f"Patch evaluation: {self.config.problem_description}",
                 )
                 self.patch_evaluator.set_session_id(eval_session.session_id)
                 logger.info(f"Created evaluation session: {eval_session.session_id}")
@@ -308,7 +320,9 @@ class AgenticCodeFixer:
         for patch in patches:
             self.patch_manager.update_patch_status(patch.id, PatchStatus.EVALUATED)
 
-        self.experiment_logger.log_evaluation_complete(evaluation_results, winning_patch)
+        self.experiment_logger.log_evaluation_complete(
+            evaluation_results, winning_patch
+        )
 
         logger.info(f"Evaluation completed, winning patch: {winning_patch.id}")
         return winning_patch
@@ -332,7 +346,9 @@ class AgenticCodeFixer:
         # Create a test environment
         test_env = self.patch_applicator.create_test_environment(
             repo_path=self.config.repository_path,
-            temp_dir=self.config.get_output_dir() / self.experiment_metadata.experiment_id / "test_env"
+            temp_dir=self.config.get_output_dir()
+            / self.experiment_metadata.experiment_id
+            / "test_env",
         )
 
         try:
@@ -353,7 +369,9 @@ class AgenticCodeFixer:
 
             self.experiment_logger.log_test_result(test_result, patch.id)
 
-            logger.info(f"Patch testing completed: {'PASSED' if test_result.passed else 'FAILED'}")
+            logger.info(
+                f"Patch testing completed: {'PASSED' if test_result.passed else 'FAILED'}"
+            )
             return test_result
 
         finally:
@@ -388,7 +406,9 @@ class AgenticCodeFixer:
             ReportGenerator instance configured with experiment data for creating
             detailed reports in multiple formats.
         """
-        experiment_dir = self.config.get_output_dir() / self.experiment_metadata.experiment_id
+        experiment_dir = (
+            self.config.get_output_dir() / self.experiment_metadata.experiment_id
+        )
         return ReportGenerator(experiment_dir)
 
     def get_experiment_statistics(self) -> dict:

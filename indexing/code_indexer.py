@@ -17,10 +17,9 @@ import logging
 import re
 from pathlib import Path
 
-from indexing.vector_store import VectorStore
-
-from core.config import VectorDBConfig, OpenCodeConfig
+from core.config import OpenCodeConfig, VectorDBConfig
 from core.types import CodeContext
+from indexing.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,9 @@ class CodeIndexer:
         language_extensions: Mapping of programming languages to file extensions.
     """
 
-    def __init__(self, config: VectorDBConfig, opencode_config: OpenCodeConfig | None = None) -> None:
+    def __init__(
+        self, config: VectorDBConfig, opencode_config: OpenCodeConfig | None = None
+    ) -> None:
         """Initialize the code indexer with vector database configuration.
 
         Args:
@@ -64,6 +65,7 @@ class CodeIndexer:
         self.opencode_client = None
         if opencode_config and opencode_config.enabled:
             from opencode_client import OpenCodeClient
+
             self.opencode_client = OpenCodeClient(opencode_config)
 
         # Language-specific file extensions
@@ -128,7 +130,9 @@ class CodeIndexer:
             # Check if there are indexed files that no longer exist
             missing_files = indexed_files - current_file_paths
             if missing_files:
-                logger.info(f"Found {len(missing_files)} indexed files that no longer exist")
+                logger.info(
+                    f"Found {len(missing_files)} indexed files that no longer exist"
+                )
                 return True
 
             logger.info("Repository indexing is up to date")
@@ -152,7 +156,9 @@ class CodeIndexer:
             raise FileNotFoundError(f"Repository path does not exist: {repo_path}")
 
         logger.info(f"Starting repository indexing: {repo_path}")
-        logger.info(f"Indexing granularity: {'function-aware chunking' if self.config.chunk_size > 0 else 'file-level'}")
+        logger.info(
+            f"Indexing granularity: {'function-aware chunking' if self.config.chunk_size > 0 else 'file-level'}"
+        )
 
         # Find all code files
         code_files = self._find_code_files(repo_path, exclude_patterns, target_files)
@@ -162,7 +168,9 @@ class CodeIndexer:
         contexts = []
         for file_path in code_files:
             try:
-                file_contexts = await self._process_file_with_opencode_context(file_path)
+                file_contexts = await self._process_file_with_opencode_context(
+                    file_path
+                )
                 contexts.extend(file_contexts)
             except Exception as e:
                 logger.warning(f"Failed to process file {file_path}: {e}")
@@ -179,14 +187,12 @@ class CodeIndexer:
     def search_relevant_context(
         self,
         problem_description: str,
-        top_k: int = 10, #TODO: We may need to increase this number
+        top_k: int = 10,  # TODO: We may need to increase this number
         file_filter: str | None = None,
     ) -> list[CodeContext]:
         """Search for code contexts relevant to a problem description."""
         results = self.vector_store.search_similar_contexts(
-            query=problem_description,
-            top_k=top_k,
-            file_filter=file_filter
+            query=problem_description, top_k=top_k, file_filter=file_filter
         )
 
         # Extract just the contexts (without scores)
@@ -222,8 +228,7 @@ class CodeIndexer:
         """
         # Get base contexts from vector search
         base_contexts = self.search_relevant_context(
-            problem_description=problem_description,
-            top_k=top_k
+            problem_description=problem_description, top_k=top_k
         )
 
         if not self.opencode_client or not include_usage_analysis:
@@ -233,8 +238,7 @@ class CodeIndexer:
 
         # Find related code using OpenCode's file analysis
         related_contexts = await self._find_related_code_contexts(
-            base_contexts=base_contexts,
-            max_related_files=max_related_files
+            base_contexts=base_contexts, max_related_files=max_related_files
         )
 
         # Combine results, prioritizing base contexts
@@ -248,12 +252,10 @@ class CodeIndexer:
             f"{len(related_contexts)} related = {len(unique_contexts)} total contexts"
         )
 
-        return unique_contexts[:top_k + max_related_files]
+        return unique_contexts[: top_k + max_related_files]
 
     async def _find_related_code_contexts(
-        self,
-        base_contexts: list[CodeContext],
-        max_related_files: int = 20
+        self, base_contexts: list[CodeContext], max_related_files: int = 20
     ) -> list[CodeContext]:
         """Find code contexts related to the base contexts using OpenCode file analysis."""
         related_contexts = []
@@ -272,7 +274,9 @@ class CodeIndexer:
 
                     for file_path in related_files[:3]:  # Limit files per function
                         if file_path != context.file_path:  # Skip same file
-                            related_context = await self._create_context_from_file(file_path)
+                            related_context = await self._create_context_from_file(
+                                file_path
+                            )
                             if related_context:
                                 related_contexts.append(related_context)
 
@@ -280,7 +284,9 @@ class CodeIndexer:
                     break
 
             except Exception as e:
-                logger.warning(f"Failed to find related contexts for {context.file_path}: {e}")
+                logger.warning(
+                    f"Failed to find related contexts for {context.file_path}: {e}"
+                )
 
         return related_contexts[:max_related_files]
 
@@ -305,8 +311,8 @@ class CodeIndexer:
 
                     # Extract file paths from results
                     for result in results:
-                        if isinstance(result, dict) and 'path' in result:
-                            found_files.add(result['path'])
+                        if isinstance(result, dict) and "path" in result:
+                            found_files.add(result["path"])
 
                 except Exception as e:
                     logger.debug(f"Search pattern '{pattern}' failed: {e}")
@@ -326,7 +332,14 @@ class CodeIndexer:
                 return existing_contexts[0]  # Return first context for this file
 
             # If not indexed, create a new context by reading the file
-            full_path = Path(self.config.repository_path if hasattr(self.config, 'repository_path') else '.') / file_path
+            full_path = (
+                Path(
+                    self.config.repository_path
+                    if hasattr(self.config, "repository_path")
+                    else "."
+                )
+                / file_path
+            )
 
             if not full_path.exists():
                 return None
@@ -365,7 +378,9 @@ class CodeIndexer:
 
         return unique_contexts
 
-    async def _process_file_with_opencode_context(self, file_path: Path) -> list[CodeContext]:
+    async def _process_file_with_opencode_context(
+        self, file_path: Path
+    ) -> list[CodeContext]:
         """Process a file with OpenCode workspace analysis for enhanced context.
 
         Uses OpenCode's workspace APIs to find related files and symbols,
@@ -381,10 +396,12 @@ class CodeIndexer:
         try:
             # Enhance contexts with OpenCode workspace analysis
             for context in contexts:
-                related_info = await self._find_opencode_related_files(file_path, context)
+                related_info = await self._find_opencode_related_files(
+                    file_path, context
+                )
 
                 # Add the related information as metadata
-                if not hasattr(context, 'metadata'):
+                if not hasattr(context, "metadata"):
                     context.metadata = {}
                 context.metadata.update(related_info)
 
@@ -394,12 +411,14 @@ class CodeIndexer:
 
         return contexts
 
-    async def _find_opencode_related_files(self, file_path: Path, context: CodeContext) -> dict:
+    async def _find_opencode_related_files(
+        self, file_path: Path, context: CodeContext
+    ) -> dict:
         """Use OpenCode to find files related to the given file and context."""
         related_info = {
             "related_files": [],
             "related_symbols": [],
-            "workspace_analysis": False
+            "workspace_analysis": False,
         }
 
         try:
@@ -410,15 +429,21 @@ class CodeIndexer:
             related_files = set()
             related_symbols = set()
 
-            for func_name in context.relevant_functions[:3]:  # Limit to avoid too many requests
+            for func_name in context.relevant_functions[
+                :3
+            ]:  # Limit to avoid too many requests
                 try:
                     # Find files that reference this function
-                    usage_results = await self.opencode_client.find_in_files(f"{func_name}(")
+                    usage_results = await self.opencode_client.find_in_files(
+                        f"{func_name}("
+                    )
 
                     for result in usage_results[:5]:  # Limit results
-                        if isinstance(result, dict) and 'path' in result:
-                            result_path = result['path']
-                            if result_path != str(file_path):  # Exclude the current file
+                        if isinstance(result, dict) and "path" in result:
+                            result_path = result["path"]
+                            if result_path != str(
+                                file_path
+                            ):  # Exclude the current file
                                 related_files.add(result_path)
 
                     # Find symbol definitions related to this function
@@ -426,7 +451,7 @@ class CodeIndexer:
 
                     for symbol in symbol_results[:3]:  # Limit results
                         if isinstance(symbol, dict):
-                            related_symbols.add(symbol.get('name', func_name))
+                            related_symbols.add(symbol.get("name", func_name))
 
                 except Exception as e:
                     logger.debug(f"Failed to analyze function {func_name}: {e}")
@@ -434,26 +459,36 @@ class CodeIndexer:
             # Also look for files that import from this file
             if context.language == "python":
                 module_name = file_path.stem  # filename without extension
-                import_results = await self.opencode_client.find_in_files(f"from.*{module_name}.*import|import.*{module_name}")
+                import_results = await self.opencode_client.find_in_files(
+                    f"from.*{module_name}.*import|import.*{module_name}"
+                )
 
                 for result in import_results[:5]:
-                    if isinstance(result, dict) and 'path' in result:
-                        result_path = result['path']
+                    if isinstance(result, dict) and "path" in result:
+                        result_path = result["path"]
                         if result_path != str(file_path):
                             related_files.add(result_path)
 
-            related_info.update({
-                "related_files": list(related_files)[:10],  # Limit to 10 related files
-                "related_symbols": list(related_symbols)[:10],  # Limit to 10 symbols
-                "workspace_analysis": True
-            })
+            related_info.update(
+                {
+                    "related_files": list(related_files)[
+                        :10
+                    ],  # Limit to 10 related files
+                    "related_symbols": list(related_symbols)[
+                        :10
+                    ],  # Limit to 10 symbols
+                    "workspace_analysis": True,
+                }
+            )
 
         except Exception as e:
             logger.debug(f"OpenCode workspace analysis failed: {e}")
 
         return related_info
 
-    def _log_indexing_statistics(self, contexts: list[CodeContext], code_files: list[Path]) -> None:
+    def _log_indexing_statistics(
+        self, contexts: list[CodeContext], code_files: list[Path]
+    ) -> None:
         """Log detailed statistics about the indexing process."""
         if not contexts:
             logger.warning("No contexts created during indexing")
@@ -478,32 +513,48 @@ class CodeIndexer:
             chunk_counts[file_path] = chunk_counts.get(file_path, 0) + 1
 
             # Count OpenCode-enhanced contexts
-            if hasattr(context, 'metadata') and context.metadata.get('workspace_analysis'):
+            if hasattr(context, "metadata") and context.metadata.get(
+                "workspace_analysis"
+            ):
                 opencode_enhanced += 1
 
         # Files with multiple chunks (indicating large files)
-        multi_chunk_files = {path: count for path, count in chunk_counts.items() if count > 1}
+        multi_chunk_files = {
+            path: count for path, count in chunk_counts.items() if count > 1
+        }
 
-        logger.info(f"Indexing Statistics:")
+        logger.info("Indexing Statistics:")
         logger.info(f"  - Total files: {total_files}")
         logger.info(f"  - Total contexts: {total_contexts}")
         logger.info(f"  - Average contexts per file: {contexts_per_file:.2f}")
-        logger.info(f"  - Language distribution: {dict(sorted(language_counts.items()))}")
+        logger.info(
+            f"  - Language distribution: {dict(sorted(language_counts.items()))}"
+        )
 
         if self.opencode_client:
-            logger.info(f"  - OpenCode-enhanced contexts: {opencode_enhanced}/{total_contexts}")
+            logger.info(
+                f"  - OpenCode-enhanced contexts: {opencode_enhanced}/{total_contexts}"
+            )
 
         if multi_chunk_files:
-            logger.info(f"  - Files split into multiple chunks: {len(multi_chunk_files)}")
-            logger.debug(f"  - Multi-chunk files: {dict(list(multi_chunk_files.items())[:5])}")
+            logger.info(
+                f"  - Files split into multiple chunks: {len(multi_chunk_files)}"
+            )
+            logger.debug(
+                f"  - Multi-chunk files: {dict(list(multi_chunk_files.items())[:5])}"
+            )
 
         # Function extraction statistics
         total_functions = sum(len(context.relevant_functions) for context in contexts)
-        contexts_with_functions = sum(1 for context in contexts if context.relevant_functions)
+        contexts_with_functions = sum(
+            1 for context in contexts if context.relevant_functions
+        )
 
         if total_functions > 0:
             logger.info(f"  - Total functions extracted: {total_functions}")
-            logger.info(f"  - Contexts with functions: {contexts_with_functions}/{total_contexts}")
+            logger.info(
+                f"  - Contexts with functions: {contexts_with_functions}/{total_contexts}"
+            )
 
     def _find_code_files(
         self,
@@ -512,7 +563,7 @@ class CodeIndexer:
         target_files: list[str] | None = None,
     ) -> list[Path]:
         """Find all code files in the repository."""
-        #TODO: Remove target_files, we should index the entire repository, not just specific files
+        # TODO: Remove target_files, we should index the entire repository, not just specific files
         if target_files:
             # Use specific target files
             files = []
@@ -545,10 +596,7 @@ class CodeIndexer:
         return code_files
 
     def _should_exclude_file(
-        self,
-        file_path: Path,
-        repo_path: Path,
-        exclude_patterns: list[str]
+        self, file_path: Path, repo_path: Path, exclude_patterns: list[str]
     ) -> bool:
         """Check if a file should be excluded based on patterns."""
         relative_path = file_path.relative_to(repo_path)
@@ -592,7 +640,7 @@ class CodeIndexer:
 
     def _detect_language(self, file_path: Path) -> str:
         """Detect programming language from file extension."""
-        #TODO: If required, we could use a library to detect the programming language in a more sophisticated way
+        # TODO: If required, we could use a library to detect the programming language in a more sophisticated way
         suffix = file_path.suffix.lower()
 
         for language, extensions in self.language_extensions.items():
@@ -602,10 +650,7 @@ class CodeIndexer:
         return "unknown"
 
     def _chunk_file_content(
-        self,
-        file_path: Path,
-        content: str,
-        language: str
+        self, file_path: Path, content: str, language: str
     ) -> list[CodeContext]:
         """Split large file content into smaller chunks."""
         contexts = []
@@ -655,7 +700,7 @@ class CodeIndexer:
         """Extract function names from code content."""
         functions = []
 
-        #TODO: Improve this 
+        # TODO: Improve this
         if language == "python":
             functions = self._extract_python_functions(content)
         elif language in ["javascript", "typescript"]:

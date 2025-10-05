@@ -45,9 +45,7 @@ class PatchEvaluator:
     """
 
     def __init__(
-        self,
-        config: EvaluationConfig,
-        opencode_config: OpenCodeConfig
+        self, config: EvaluationConfig, opencode_config: OpenCodeConfig
     ) -> None:
         """Initialize the patch evaluator with OpenCode-powered comparison capabilities.
 
@@ -58,7 +56,9 @@ class PatchEvaluator:
         """
         self.config = config
         self.opencode_config = opencode_config
-        self.opencode_client = OpenCodeClient(opencode_config) if opencode_config.enabled else None
+        self.opencode_client = (
+            OpenCodeClient(opencode_config) if opencode_config.enabled else None
+        )
         self.session_id: str | None = None
 
         logger.info("Initialized patch evaluator with OpenCode SST")
@@ -126,8 +126,7 @@ class PatchEvaluator:
 
         try:
             results = await asyncio.gather(
-                *[bounded_evaluation(task) for task in tasks],
-                return_exceptions=True
+                *[bounded_evaluation(task) for task in tasks], return_exceptions=True
             )
 
             # Filter successful results
@@ -180,7 +179,7 @@ class PatchEvaluator:
                 model=self.config.model_name,
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
-                agent_id="patch_evaluator"
+                agent_id="patch_evaluator",
             )
 
             # Parse evaluation response
@@ -282,18 +281,24 @@ Please evaluate these two patches and determine which one better solves the prob
         """Parse the evaluation response from OpenCode's LLM."""
         try:
             # Extract content from OpenCode response
-            content = response.get("content") or response.get("text") or response.get("response", "")
+            content = (
+                response.get("content")
+                or response.get("text")
+                or response.get("response", "")
+            )
 
             # Extract JSON from response
             import json
             import re
 
-            json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
+            json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
             if json_match:
                 eval_data = json.loads(json_match.group(1))
             else:
                 # Try to find JSON object in response
-                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
+                json_match = re.search(
+                    r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", content, re.DOTALL
+                )
                 if json_match:
                     eval_data = json.loads(json_match.group(0))
                 else:
@@ -307,7 +312,11 @@ Please evaluate these two patches and determine which one better solves the prob
                 winner_id = patch_b.id
             else:
                 # Default to higher confidence patch
-                winner_id = patch_a.id if patch_a.confidence_score >= patch_b.confidence_score else patch_b.id
+                winner_id = (
+                    patch_a.id
+                    if patch_a.confidence_score >= patch_b.confidence_score
+                    else patch_b.id
+                )
 
             return EvaluationResult(
                 patch_a_id=patch_a.id,
@@ -341,7 +350,9 @@ Please evaluate these two patches and determine which one better solves the prob
         patch_b: PatchCandidate,
     ) -> EvaluationResult:
         """Legacy method for backward compatibility."""
-        logger.warning("Using deprecated _parse_evaluation_response, use _parse_opencode_evaluation_response instead")
+        logger.warning(
+            "Using deprecated _parse_evaluation_response, use _parse_opencode_evaluation_response instead"
+        )
         return EvaluationResult(
             patch_a_id=patch_a.id,
             patch_b_id=patch_b.id,
@@ -385,7 +396,9 @@ Please evaluate these two patches and determine which one better solves the prob
         )
 
         if not evaluation_results:
-            logger.warning("No evaluation results available, returning highest confidence patch")
+            logger.warning(
+                "No evaluation results available, returning highest confidence patch"
+            )
             return max(patches, key=lambda p: p.confidence_score)
 
         # Count wins for each patch
@@ -423,7 +436,9 @@ Please evaluate these two patches and determine which one better solves the prob
 
         return best_patch
 
-    def get_evaluation_stats(self, evaluation_results: list[EvaluationResult]) -> dict[str, any]:
+    def get_evaluation_stats(
+        self, evaluation_results: list[EvaluationResult]
+    ) -> dict[str, any]:
         """Get statistics about evaluation results."""
         if not evaluation_results:
             return {"total_evaluations": 0}

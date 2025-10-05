@@ -44,9 +44,7 @@ class PatchApplicator:
     """
 
     def __init__(
-        self,
-        config: TestingConfig,
-        opencode_config: OpenCodeConfig | None = None
+        self, config: TestingConfig, opencode_config: OpenCodeConfig | None = None
     ) -> None:
         """Initialize the patch applicator with testing and validation configuration.
 
@@ -66,8 +64,10 @@ class PatchApplicator:
         if opencode_config and opencode_config.enable_shell_execution:
             self.opencode_client = OpenCodeClient(opencode_config)
 
-        logger.info("Initialized patch applicator with OpenCode integration: %s",
-                   bool(self.opencode_client))
+        logger.info(
+            "Initialized patch applicator with OpenCode integration: %s",
+            bool(self.opencode_client),
+        )
 
     def apply_patch(
         self,
@@ -110,21 +110,23 @@ class PatchApplicator:
 
             # Apply patch by replacing lines
             if patch.line_end >= len(lines):
-                logger.error(f"Patch line range exceeds file length: {patch.line_end} >= {len(lines)}")
+                logger.error(
+                    f"Patch line range exceeds file length: {patch.line_end} >= {len(lines)}"
+                )
                 return False
 
             # Replace the specified line range with patch content
             patch_lines = patch.content.split("\n")
             if not patch.content.endswith("\n"):
-                patch_lines = [line + "\n" for line in patch_lines[:-1]] + [patch_lines[-1]]
+                patch_lines = [line + "\n" for line in patch_lines[:-1]] + [
+                    patch_lines[-1]
+                ]
             else:
                 patch_lines = [line + "\n" for line in patch_lines]
 
             # Apply the patch
             new_lines = (
-                lines[:patch.line_start] +
-                patch_lines +
-                lines[patch.line_end + 1:]
+                lines[: patch.line_start] + patch_lines + lines[patch.line_end + 1 :]
             )
 
             # Write modified content back to file
@@ -172,11 +174,11 @@ class PatchApplicator:
                 self._run_command(cmd, repo_path)
 
             # Run main test command
-            #TODO: We might need an LLM call with MCP to understand how to run the tests.
+            # TODO: We might need an LLM call with MCP to understand how to run the tests.
             result = self._run_command(
                 self.config.test_command,
                 repo_path,
-                timeout=self.config.test_timeout_seconds
+                timeout=self.config.test_timeout_seconds,
             )
 
             # Run post-test commands
@@ -267,8 +269,7 @@ class PatchApplicator:
         # Check for regressions if baseline is provided
         if baseline_test_result and self.config.fail_on_regression:
             test_result.new_failures = self._find_new_failures(
-                baseline_test_result.failed_tests,
-                test_result.failed_tests
+                baseline_test_result.failed_tests, test_result.failed_tests
             )
 
         return apply_success, test_result
@@ -292,14 +293,16 @@ class PatchApplicator:
         Returns:
             Path to the created test environment directory.
         """
-        #TODO: This can be improved. Think about large repositories, monorepos, etc. Does it make sense to copy the entire repository? If it's a git repository, we might be able to use worktrees.
-        #TODO: What happens with the dependencies?
+        # TODO: This can be improved. Think about large repositories, monorepos, etc. Does it make sense to copy the entire repository? If it's a git repository, we might be able to use worktrees.
+        # TODO: What happens with the dependencies?
         repo_path = Path(repo_path)
 
         if temp_dir:
             temp_path = Path(temp_dir)
             temp_path.mkdir(parents=True, exist_ok=True)
-            test_env = temp_path / f"test_env_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            test_env = (
+                temp_path / f"test_env_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
         else:
             test_env = Path(tempfile.mkdtemp(prefix="agentic_code_fixer_"))
 
@@ -393,7 +396,9 @@ class PatchApplicator:
                 timeout=timeout,
             )
 
-            logger.debug(f"Command '{command}' completed with exit code {result.returncode}")
+            logger.debug(
+                f"Command '{command}' completed with exit code {result.returncode}"
+            )
             return result
 
         except subprocess.TimeoutExpired:
@@ -433,6 +438,7 @@ class PatchApplicator:
         ]
 
         import re
+
         for pattern in patterns:
             matches = re.findall(pattern, output)
             failed_tests.extend(matches)
@@ -444,9 +450,7 @@ class PatchApplicator:
         return failed_tests
 
     def _find_new_failures(
-        self,
-        baseline_failures: list[str],
-        current_failures: list[str]
+        self, baseline_failures: list[str], current_failures: list[str]
     ) -> list[str]:
         """Identify regression failures by comparing current results with baseline.
 

@@ -94,9 +94,13 @@ class EloRanker:
         """Update ELO ratings for a pair of patches."""
         # Ensure ratings exist
         if patch_a_id not in self.ratings:
-            self.ratings[patch_a_id] = EloRating(patch_id=patch_a_id, rating=self.initial_rating)
+            self.ratings[patch_a_id] = EloRating(
+                patch_id=patch_a_id, rating=self.initial_rating
+            )
         if patch_b_id not in self.ratings:
-            self.ratings[patch_b_id] = EloRating(patch_id=patch_b_id, rating=self.initial_rating)
+            self.ratings[patch_b_id] = EloRating(
+                patch_id=patch_b_id, rating=self.initial_rating
+            )
 
         rating_a = self.ratings[patch_a_id]
         rating_b = self.ratings[patch_b_id]
@@ -174,7 +178,9 @@ class EloRanker:
 
     def get_rating(self, patch_id: str) -> EloRating:
         """Get ELO rating for a specific patch."""
-        return self.ratings.get(patch_id, EloRating(patch_id=patch_id, rating=self.initial_rating))
+        return self.ratings.get(
+            patch_id, EloRating(patch_id=patch_id, rating=self.initial_rating)
+        )
 
     def get_all_ratings(self) -> list[EloRating]:
         """Get all ELO ratings sorted by rating."""
@@ -203,7 +209,9 @@ class EloRanker:
         num_rounds: int = 100,
     ) -> list[PatchCandidate]:
         """Simulate a tournament to determine final rankings."""
-        logger.info(f"Starting ELO tournament with {len(patches)} patches for {num_rounds} rounds")
+        logger.info(
+            f"Starting ELO tournament with {len(patches)} patches for {num_rounds} rounds"
+        )
 
         # Initialize ratings
         self.initialize_patch_ratings(patches)

@@ -149,7 +149,9 @@ class ExperimentLogger:
             num_agents: Number of AI agents participating in patch generation.
         """
         if self.console:
-            self.console.print(f"[bold blue]Starting patch generation with {num_agents} agents...[/bold blue]")
+            self.console.print(
+                f"[bold blue]Starting patch generation with {num_agents} agents...[/bold blue]"
+            )
 
         logger.info(f"Starting patch generation with {num_agents} agents")
 
@@ -197,7 +199,9 @@ class ExperimentLogger:
                     patch.agent_id,
                     Path(patch.file_path).name,
                     f"{patch.confidence_score:.2f}",
-                    patch.description[:50] + "..." if len(patch.description) > 50 else patch.description,
+                    patch.description[:50] + "..."
+                    if len(patch.description) > 50
+                    else patch.description,
                 )
 
             self.console.print(table)
@@ -215,7 +219,9 @@ class ExperimentLogger:
             method: Evaluation method being used (e.g., 'pairwise', 'tournament').
         """
         if self.console:
-            self.console.print(f"[bold blue]Starting {method} evaluation of {num_patches} patches...[/bold blue]")
+            self.console.print(
+                f"[bold blue]Starting {method} evaluation of {num_patches} patches...[/bold blue]"
+            )
 
         logger.info(f"Starting {method} evaluation of {num_patches} patches")
 
@@ -233,9 +239,13 @@ class ExperimentLogger:
         if self.config.save_evaluations:
             self.experiment_data["evaluations"].append(result.model_dump())
 
-        logger.debug(f"Evaluation: {result.patch_a_id} vs {result.patch_b_id} -> {result.winner_id}")
+        logger.debug(
+            f"Evaluation: {result.patch_a_id} vs {result.patch_b_id} -> {result.winner_id}"
+        )
 
-    def log_evaluation_complete(self, results: list[EvaluationResult], winner: PatchCandidate | None) -> None:
+    def log_evaluation_complete(
+        self, results: list[EvaluationResult], winner: PatchCandidate | None
+    ) -> None:
         """Log the completion of evaluation with winner announcement.
 
         Displays evaluation summary and highlights the winning patch candidate
@@ -247,7 +257,9 @@ class ExperimentLogger:
                 if no clear winner was determined.
         """
         if self.console:
-            self.console.print(f"[green]✓ Evaluation completed: {len(results)} comparisons[/green]")
+            self.console.print(
+                f"[green]✓ Evaluation completed: {len(results)} comparisons[/green]"
+            )
 
             if winner:
                 panel = Panel(
@@ -261,7 +273,9 @@ class ExperimentLogger:
                 )
                 self.console.print(panel)
 
-        logger.info(f"Evaluation completed: {len(results)} comparisons, winner: {winner.id if winner else 'None'}")
+        logger.info(
+            f"Evaluation completed: {len(results)} comparisons, winner: {winner.id if winner else 'None'}"
+        )
 
     def log_test_start(self, patch_id: str) -> None:
         """Log the beginning of patch testing and validation.
@@ -297,12 +311,18 @@ class ExperimentLogger:
         color = "green" if result.passed else "red"
 
         if self.console:
-            self.console.print(f"[{color}]✓ Tests {status} ({result.duration_seconds:.1f}s)[/{color}]")
+            self.console.print(
+                f"[{color}]✓ Tests {status} ({result.duration_seconds:.1f}s)[/{color}]"
+            )
 
             if not result.passed and result.failed_tests:
-                self.console.print(f"[red]Failed tests: {', '.join(result.failed_tests[:3])}[/red]")
+                self.console.print(
+                    f"[red]Failed tests: {', '.join(result.failed_tests[:3])}[/red]"
+                )
 
-        logger.info(f"Test result for patch {patch_id}: {status} ({result.duration_seconds:.1f}s)")
+        logger.info(
+            f"Test result for patch {patch_id}: {status} ({result.duration_seconds:.1f}s)"
+        )
 
     def log_experiment_complete(self, metadata: ExperimentMetadata) -> None:
         """Log the completion of the entire experiment with comprehensive results.
@@ -413,10 +433,13 @@ class ExperimentLogger:
             class DummyProgress:
                 def __enter__(self):
                     return self
+
                 def __exit__(self, *args):
                     pass
+
                 def add_task(self, description, total=None):
                     return 0
+
                 def update(self, task_id, advance=1):
                     pass
 

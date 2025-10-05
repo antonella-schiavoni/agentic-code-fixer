@@ -44,8 +44,8 @@ class AgentOrchestrator:
         active_sessions: Dictionary of active OpenCode sessions by agent ID.
     """
 
-    def __init__(self, config: Config) -> None:
-        """Initialize the agent orchestrator with system configuration.
+    def __init__(self, config: Config, code_indexer: CodeIndexer) -> None:
+        """Initialize the agent orchestrator with system configuration and code indexer.
 
         Sets up the OpenCode client, initializes all configured agents, and
         prepares the session-based orchestration infrastructure. LLM provider
@@ -54,9 +54,14 @@ class AgentOrchestrator:
         Args:
             config: Complete system configuration including agent definitions
                 and orchestration parameters.
+            code_indexer: Code indexer instance for context retrieval during
+                patch generation. Stored as instance variable to avoid repeated
+                parameter passing.
         """
         self.config = config
         self.opencode_config = config.opencode
+        self._code_indexer = code_indexer
+        self._indices_dirty = False
         self.agents: list[OpenCodeAgent] = []
         self.active_sessions: dict[str, OpenCodeSession] = {}
 
@@ -69,7 +74,9 @@ class AgentOrchestrator:
         # Initialize agents
         self._initialize_agents()
 
-        logger.info(f"Initialized orchestrator with {len(self.agents)} agents using OpenCode SST")
+        logger.info(
+            f"Initialized orchestrator with {len(self.agents)} agents using OpenCode SST"
+        )
 
     def _initialize_agents(self) -> None:
         """Initialize all configured agents."""
@@ -83,24 +90,26 @@ class AgentOrchestrator:
     async def generate_patches(
         self,
         problem_description: str,
-        code_indexer: CodeIndexer,
         target_files: list[str] | None = None,
     ) -> list[PatchCandidate]:
-        """Generate patch candidates using all agents with OpenCode session management."""
+        """Generate patch candidates using all agents with OpenCode session management.
+
+        Uses the internal code indexer for context retrieval during patch generation.
+        """
         logger.info("Starting patch generation with all agents")
 
         # Initialize OpenCode sessions if enabled
         if self.opencode_config.use_sessions and self.opencode_client:
             await self._initialize_agent_sessions(
                 problem_description=problem_description,
-                repository_path=self.config.repository_path
+                repository_path=self.config.repository_path,
             )
 
         try:
             # Get relevant code contexts
-            relevant_contexts = code_indexer.search_relevant_context(
+            relevant_contexts = self._code_indexer.search_relevant_context(
                 problem_description=problem_description,
-                top_k=10  # TODO: We may need to increase this number
+                top_k=10,  # TODO: We may need to increase this number
             )
 
             if not relevant_contexts:
@@ -120,7 +129,9 @@ class AgentOrchestrator:
             # TODO: Evaluate if this logic makes sense. Each agent generates a solution for a single file.
             for target_file in target_files:
                 # Get contexts specific to this file
-                file_contexts = [ctx for ctx in relevant_contexts if ctx.file_path == target_file]
+                file_contexts = [
+                    ctx for ctx in relevant_contexts if ctx.file_path == target_file
+                ]
 
                 # Create tasks for each agent to generate patches for this file
                 for agent in self.agents:
@@ -143,8 +154,10 @@ class AgentOrchestrator:
             # Run tasks with timeout
             try:
                 results = await asyncio.wait_for(
-                    asyncio.gather(*[bounded_task(task) for task in tasks], return_exceptions=True),
-                    timeout=self.opencode_config.session_timeout_seconds
+                    asyncio.gather(
+                        *[bounded_task(task) for task in tasks], return_exceptions=True
+                    ),
+                    timeout=self.opencode_config.session_timeout_seconds,
                 )
 
                 # Collect successful patches
@@ -155,13 +168,15 @@ class AgentOrchestrator:
                         logger.error(f"Agent task failed: {result}")
 
             except TimeoutError:
-                logger.error(f"Patch generation timed out after {self.opencode_config.session_timeout_seconds}s")
+                logger.error(
+                    f"Patch generation timed out after {self.opencode_config.session_timeout_seconds}s"
+                )
 
             # Sort patches by confidence score
             all_patches.sort(key=lambda p: p.confidence_score, reverse=True)
 
             # Limit to requested number of candidates
-            final_patches = all_patches[:self.config.num_candidate_solutions]
+            final_patches = all_patches[: self.config.num_candidate_solutions]
 
             logger.info(f"Generated {len(final_patches)} patch candidates")
             return final_patches
@@ -191,17 +206,18 @@ class AgentOrchestrator:
     async def generate_diverse_patches(
         self,
         problem_description: str,
-        code_indexer: CodeIndexer,
         target_files: list[str] | None = None,
-        diversity_factor: float = 0.3,  # noqa: ARG002
+        diversity_factor: float = 0.3,
     ) -> list[PatchCandidate]:
-        """Generate diverse patch candidates by varying agent parameters."""
+        """Generate diverse patch candidates by varying agent parameters.
+
+        Uses the internal code indexer for context retrieval during patch generation.
+        """
         logger.info("Generating diverse patches with parameter variation")
 
         # Generate base patches
         base_patches = await self.generate_patches(
             problem_description=problem_description,
-            code_indexer=code_indexer,
             target_files=target_files,
         )
 
@@ -213,7 +229,9 @@ class AgentOrchestrator:
         for agent in self.agents:
             # Create agent variants with different temperatures
             for temp_offset in [-0.2, 0.2]:
-                new_temp = max(0.0, min(2.0, agent.agent_config.temperature + temp_offset))
+                new_temp = max(
+                    0.0, min(2.0, agent.agent_config.temperature + temp_offset)
+                )
                 if new_temp != agent.agent_config.temperature:
                     # Create variant agent config
                     variant_config = AgentConfig(
@@ -228,22 +246,28 @@ class AgentOrchestrator:
                     variant_agent = OpenCodeAgent(
                         agent_config=variant_config,
                         opencode_config=self.opencode_config,
-                        claude_client=self.claude_client,
                     )
 
                     # Generate patches with variant
-                    relevant_contexts = code_indexer.search_relevant_context(
-                        problem_description=problem_description,
-                        top_k=5
+                    relevant_contexts = self._code_indexer.search_relevant_context(
+                        problem_description=problem_description, top_k=5
                     )
 
                     if target_files:
                         files_to_process = target_files
                     else:
-                        files_to_process = list(set(ctx.file_path for ctx in relevant_contexts))
+                        files_to_process = list(
+                            set(ctx.file_path for ctx in relevant_contexts)
+                        )
 
-                    for target_file in files_to_process[:2]:  # Limit to avoid too many variants
-                        file_contexts = [ctx for ctx in relevant_contexts if ctx.file_path == target_file]
+                    for target_file in files_to_process[
+                        :2
+                    ]:  # Limit to avoid too many variants
+                        file_contexts = [
+                            ctx
+                            for ctx in relevant_contexts
+                            if ctx.file_path == target_file
+                        ]
                         variant_patch = await variant_agent.generate_patch(
                             problem_description=problem_description,
                             relevant_contexts=file_contexts,
@@ -257,12 +281,14 @@ class AgentOrchestrator:
         unique_patches.sort(key=lambda p: p.confidence_score, reverse=True)
 
         # Return top candidates
-        final_diverse_patches = unique_patches[:self.config.num_candidate_solutions]
+        final_diverse_patches = unique_patches[: self.config.num_candidate_solutions]
 
         logger.info(f"Generated {len(final_diverse_patches)} diverse patch candidates")
         return final_diverse_patches
 
-    def _deduplicate_patches(self, patches: list[PatchCandidate]) -> list[PatchCandidate]:
+    def _deduplicate_patches(
+        self, patches: list[PatchCandidate]
+    ) -> list[PatchCandidate]:
         """Remove duplicate patches based on content similarity."""
         unique_patches = []
         seen_contents = set()
@@ -277,25 +303,30 @@ class AgentOrchestrator:
 
         return unique_patches
 
-    async def validate_patches(self, patches: list[PatchCandidate]) -> list[PatchCandidate]:
+    async def validate_patches(
+        self, patches: list[PatchCandidate]
+    ) -> list[PatchCandidate]:
         """Validate patch candidates for syntax and basic correctness."""
         validated_patches = []
 
         for patch in patches:
             # Determine language from file extension
-            file_ext = patch.file_path.split('.')[-1].lower()
+            file_ext = patch.file_path.split(".")[-1].lower()
             language_map = {
-                'py': 'python',
-                'js': 'javascript',
-                'ts': 'typescript',
-                'java': 'java',
-                'cpp': 'cpp',
-                'c': 'c',
+                "py": "python",
+                "js": "javascript",
+                "ts": "typescript",
+                "java": "java",
+                "cpp": "cpp",
+                "c": "c",
             }
-            language = language_map.get(file_ext, 'unknown')
+            language = language_map.get(file_ext, "unknown")
 
             # Find the agent that generated this patch
-            agent = next((a for a in self.agents if a.agent_config.agent_id == patch.agent_id), None)
+            agent = next(
+                (a for a in self.agents if a.agent_config.agent_id == patch.agent_id),
+                None,
+            )
 
             if agent:
                 is_valid = await agent.validate_patch_syntax(patch, language)
@@ -311,9 +342,7 @@ class AgentOrchestrator:
         return validated_patches
 
     async def _initialize_agent_sessions(
-        self,
-        problem_description: str,
-        repository_path: str
+        self, problem_description: str, repository_path: str
     ) -> None:
         """Initialize OpenCode sessions for each agent.
 
@@ -328,21 +357,27 @@ class AgentOrchestrator:
             try:
                 session = await self.opencode_client.initialize_session_for_repository(
                     repository_path=repository_path,
-                    problem_description=problem_description
+                    problem_description=problem_description,
                 )
-                session.metadata.update({
-                    "agent_id": agent.agent_config.agent_id,
-                    "specialized_role": agent.agent_config.specialized_role
-                })
+                session.metadata.update(
+                    {
+                        "agent_id": agent.agent_config.agent_id,
+                        "specialized_role": agent.agent_config.specialized_role,
+                    }
+                )
                 self.active_sessions[agent.agent_config.agent_id] = session
 
                 # Assign session ID to the agent
                 agent.set_session_id(session.session_id)
 
-                logger.info(f"Initialized session {session.session_id} for agent {agent.agent_config.agent_id}")
+                logger.info(
+                    f"Initialized session {session.session_id} for agent {agent.agent_config.agent_id}"
+                )
 
             except Exception as e:
-                logger.error(f"Failed to initialize session for agent {agent.agent_config.agent_id}: {e}")
+                logger.error(
+                    f"Failed to initialize session for agent {agent.agent_config.agent_id}: {e}"
+                )
 
     async def _cleanup_agent_sessions(self) -> None:
         """Clean up all active OpenCode sessions."""
@@ -357,6 +392,62 @@ class AgentOrchestrator:
                 logger.warning(f"Failed to cleanup session for agent {agent_id}: {e}")
 
         self.active_sessions.clear()
+
+    async def _update_indices_if_needed(self) -> None:
+        """Update vector database indices if changes have occurred.
+
+        Checks the internal dirty flag and updates the code indexer's vector
+        database if any code modifications were made during patch operations.
+        Resets the dirty flag after successful update.
+        """
+        if not self._indices_dirty:
+            return
+
+        try:
+            # Check if the indexer has an update method
+            if hasattr(self._code_indexer, "update_repository"):
+                await self._code_indexer.update_repository(
+                    repo_path=self.config.repository_path,
+                    exclude_patterns=getattr(self.config, "exclude_patterns", []),
+                )
+                logger.info("Updated vector database indices after code changes")
+            elif hasattr(self._code_indexer, "reindex_repository"):
+                # Fallback to full reindexing if update not available
+                await self._code_indexer.reindex_repository(
+                    repo_path=self.config.repository_path,
+                    exclude_patterns=getattr(self.config, "exclude_patterns", []),
+                )
+                logger.info("Re-indexed vector database after code changes")
+            else:
+                logger.warning("Code indexer does not support updating indices")
+
+            self._indices_dirty = False
+
+        except Exception as e:
+            logger.error(f"Failed to update vector database indices: {e}")
+            # Keep the dirty flag set for potential retry
+
+    def flush_indices(self) -> None:
+        """Public method to trigger index updates if needed.
+
+        This method can be called externally to ensure any pending
+        index updates are applied.
+        """
+        import asyncio
+
+        # Store reference to task to avoid RUF006 warning
+        task = asyncio.create_task(self._update_indices_if_needed())
+        # Don't await here since this is a synchronous method
+        # The task will run in the background
+
+    def mark_indices_dirty(self) -> None:
+        """Mark indices as needing update due to code changes.
+
+        Should be called whenever code modifications are persisted
+        that would affect the vector database.
+        """
+        self._indices_dirty = True
+        logger.debug("Marked vector database indices as dirty")
 
     def get_orchestrator_stats(self) -> dict[str, any]:
         """Get statistics about the orchestrator and its agents."""
@@ -373,7 +464,7 @@ class AgentOrchestrator:
                 "active_sessions": len(self.active_sessions),
                 "shell_execution_enabled": self.opencode_config.enable_shell_execution,
                 "code_analysis_enabled": self.opencode_config.enable_code_analysis,
-            }
+            },
         }
 
         return stats

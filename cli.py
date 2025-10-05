@@ -21,7 +21,9 @@ from rich.console import Console
 from coordinator import run_from_config
 from core import create_default_config, load_config
 
-app = typer.Typer(name="agentic-code-fixer", help="Automated code patch generation and evaluation")
+app = typer.Typer(
+    name="agentic-code-fixer", help="Automated code patch generation and evaluation"
+)
 console = Console()
 
 
@@ -54,9 +56,13 @@ def run(
         if experiment_metadata.success:
             console.print("[green]✓ Experiment completed successfully![/green]")
             console.print(f"Winning patch: {experiment_metadata.winning_patch_id}")
-            console.print(f"Duration: {experiment_metadata.total_duration_seconds:.1f}s")
+            console.print(
+                f"Duration: {experiment_metadata.total_duration_seconds:.1f}s"
+            )
         else:
-            console.print(f"[red]✗ Experiment failed: {experiment_metadata.error_message}[/red]")
+            console.print(
+                f"[red]✗ Experiment failed: {experiment_metadata.error_message}[/red]"
+            )
             raise typer.Exit(1)
 
     except Exception as e:
@@ -67,8 +73,12 @@ def run(
 @app.command()
 def create_config(
     repository_path: str = typer.Argument(..., help="Path to target repository"),
-    problem_description: str = typer.Argument(..., help="Description of the problem to fix"),
-    model_name: str = typer.Argument(..., help="Claude model name to use (e.g., claude-sonnet-4-5-20250929)"),
+    problem_description: str = typer.Argument(
+        ..., help="Description of the problem to fix"
+    ),
+    model_name: str = typer.Argument(
+        ..., help="Claude model name to use (e.g., claude-sonnet-4-5-20250929)"
+    ),
     output_path: str = typer.Option("config.yaml", help="Output path for config file"),
 ) -> None:
     """Generate a default configuration file with sensible defaults.
@@ -92,7 +102,9 @@ def create_config(
         )
 
         console.print(f"[green]✓ Created configuration file: {output_path}[/green]")
-        console.print("Edit the configuration file to customize settings before running.")
+        console.print(
+            "Edit the configuration file to customize settings before running."
+        )
 
     except Exception as e:
         console.print(f"[red]Error creating config: {e}[/red]")
@@ -181,7 +193,9 @@ def list_experiments(
         experiments_path = Path(output_dir)
 
         if not experiments_path.exists():
-            console.print(f"[yellow]No experiments directory found: {output_dir}[/yellow]")
+            console.print(
+                f"[yellow]No experiments directory found: {output_dir}[/yellow]"
+            )
             return
 
         experiments = [d for d in experiments_path.iterdir() if d.is_dir()]
@@ -229,7 +243,9 @@ def baseline_test(
         result = applicator.run_tests(repository_path)
 
         if result.passed:
-            console.print(f"[green]✓ Tests passed ({result.duration_seconds:.1f}s)[/green]")
+            console.print(
+                f"[green]✓ Tests passed ({result.duration_seconds:.1f}s)[/green]"
+            )
         else:
             console.print(f"[red]✗ Tests failed ({result.duration_seconds:.1f}s)[/red]")
             if result.failed_tests:
@@ -242,9 +258,9 @@ def baseline_test(
 
 @app.command()
 def version() -> None:
-    """Display version information for the Agentic Code Fixer system.
-    """
+    """Display version information for the Agentic Code Fixer system."""
     from __init__ import __version__
+
     console.print(f"Agentic Code Fixer v{__version__}")
 
 

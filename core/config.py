@@ -211,7 +211,7 @@ def load_config(config_path: str | Path) -> Config:
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
     with open(config_path, encoding="utf-8") as f:
-        #TODO: Use only one, yaml or json
+        # TODO: Use only one, yaml or json
         if config_path.suffix.lower() in [".yaml", ".yml"]:
             data = yaml.safe_load(f)
         elif config_path.suffix.lower() == ".json":

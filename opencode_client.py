@@ -81,7 +81,7 @@ class OpenCodeClient:
         self.config = config
         self.client = httpx.AsyncClient(
             base_url=config.server_url,
-            timeout=httpx.Timeout(config.session_timeout_seconds)
+            timeout=httpx.Timeout(config.session_timeout_seconds),
         )
         self.active_sessions: dict[str, OpenCodeSession] = {}
 
@@ -108,9 +108,7 @@ class OpenCodeClient:
         logger.info("OpenCode client closed")
 
     async def create_session(
-        self,
-        parent_id: str | None = None,
-        metadata: dict[str, Any] | None = None
+        self, parent_id: str | None = None, metadata: dict[str, Any] | None = None
     ) -> OpenCodeSession:
         """Create a new OpenCode SST session.
 
@@ -138,7 +136,7 @@ class OpenCodeClient:
             session_id=session_data["id"],
             parent_id=parent_id,
             created_at=session_data.get("created_at", ""),
-            metadata=metadata or {}
+            metadata=metadata or {},
         )
 
         self.active_sessions[session.session_id] = session
@@ -168,10 +166,7 @@ class OpenCodeClient:
             return False
 
     async def execute_shell_command(
-        self,
-        session_id: str,
-        command: str,
-        timeout: int | None = None
+        self, session_id: str, command: str, timeout: int | None = None
     ) -> OpenCodeShellResult:
         """Execute a shell command within an OpenCode session.
 
@@ -190,10 +185,7 @@ class OpenCodeClient:
         if timeout:
             payload["timeout"] = timeout
 
-        response = await self.client.post(
-            f"/session/{session_id}/shell",
-            json=payload
-        )
+        response = await self.client.post(f"/session/{session_id}/shell", json=payload)
         response.raise_for_status()
 
         result_data = response.json()
@@ -203,7 +195,7 @@ class OpenCodeClient:
             exit_code=result_data.get("exit_code", 0),
             stdout=result_data.get("stdout", ""),
             stderr=result_data.get("stderr", ""),
-            execution_time=result_data.get("execution_time", 0.0)
+            execution_time=result_data.get("execution_time", 0.0),
         )
 
         logger.debug(f"Executed shell command in session {session_id}: {command}")
@@ -264,10 +256,7 @@ class OpenCodeClient:
             return []
 
     async def search_files(
-        self,
-        session_id: str,
-        query: str,
-        file_patterns: list[str] | None = None
+        self, session_id: str, query: str, file_patterns: list[str] | None = None
     ) -> list[str]:
         """Search for files using OpenCode's file search capability.
 
@@ -284,8 +273,7 @@ class OpenCodeClient:
             payload["patterns"] = file_patterns
 
         response = await self.client.post(
-            f"/session/{session_id}/files/search",
-            json=payload
+            f"/session/{session_id}/files/search", json=payload
         )
         response.raise_for_status()
 
@@ -296,9 +284,7 @@ class OpenCodeClient:
         return files
 
     async def get_file_symbols(
-        self,
-        session_id: str,
-        file_path: str
+        self, session_id: str, file_path: str
     ) -> list[dict[str, Any]]:
         """Get code symbols from a file using OpenCode's analysis.
 
@@ -328,7 +314,7 @@ class OpenCodeClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         system_prompt: str | None = None,
-        agent_id: str | None = None
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         """Send a prompt to an LLM through OpenCode's provider system.
 
@@ -360,14 +346,13 @@ class OpenCodeClient:
         if agent_id:
             payload["agent_id"] = agent_id
 
-        response = await self.client.post(
-            f"/session/{session_id}/prompt",
-            json=payload
-        )
+        response = await self.client.post(f"/session/{session_id}/prompt", json=payload)
         response.raise_for_status()
 
         result = response.json()
-        logger.debug(f"Sent prompt to session {session_id} using model {model or 'default'}")
+        logger.debug(
+            f"Sent prompt to session {session_id} using model {model or 'default'}"
+        )
 
         return result
 
@@ -389,7 +374,7 @@ class OpenCodeClient:
                 parent_id=session_data.get("parent_id"),
                 status=session_data.get("status", "active"),
                 created_at=session_data.get("created_at", ""),
-                metadata=session_data.get("metadata", {})
+                metadata=session_data.get("metadata", {}),
             )
             sessions.append(session)
 
@@ -397,9 +382,7 @@ class OpenCodeClient:
         return sessions
 
     async def initialize_session_for_repository(
-        self,
-        repository_path: str,
-        problem_description: str
+        self, repository_path: str, problem_description: str
     ) -> OpenCodeSession:
         """Initialize an OpenCode session for a specific repository.
 
@@ -417,24 +400,20 @@ class OpenCodeClient:
             metadata={
                 "repository_path": repository_path,
                 "problem_description": problem_description,
-                "purpose": "patch_generation"
+                "purpose": "patch_generation",
             }
         )
 
         # Change to repository directory
-        await self.execute_shell_command(
-            session.session_id,
-            f"cd {repository_path}"
-        )
+        await self.execute_shell_command(session.session_id, f"cd {repository_path}")
 
-        logger.info(f"Initialized session {session.session_id} for repository: {repository_path}")
+        logger.info(
+            f"Initialized session {session.session_id} for repository: {repository_path}"
+        )
         return session
 
     async def run_tests_in_session(
-        self,
-        session_id: str,
-        test_command: str = "pytest",
-        timeout: int | None = None
+        self, session_id: str, test_command: str = "pytest", timeout: int | None = None
     ) -> OpenCodeShellResult:
         """Run tests within an OpenCode session.
 
@@ -447,10 +426,10 @@ class OpenCodeClient:
             OpenCodeShellResult containing test execution results.
         """
         result = await self.execute_shell_command(
-            session_id,
-            test_command,
-            timeout or self.config.session_timeout_seconds
+            session_id, test_command, timeout or self.config.session_timeout_seconds
         )
 
-        logger.info(f"Test execution in session {session_id}: exit_code={result.exit_code}")
+        logger.info(
+            f"Test execution in session {session_id}: exit_code={result.exit_code}"
+        )
         return result

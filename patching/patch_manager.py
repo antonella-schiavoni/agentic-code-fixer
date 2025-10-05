@@ -149,7 +149,9 @@ class PatchManager:
         Returns:
             List of PatchCandidate objects targeting the specified file.
         """
-        return [patch for patch in self.patches.values() if patch.file_path == file_path]
+        return [
+            patch for patch in self.patches.values() if patch.file_path == file_path
+        ]
 
     def get_all_patches(self) -> list[PatchCandidate]:
         """Retrieve all patch candidates in the managed collection.
@@ -182,11 +184,7 @@ class PatchManager:
         logger.info(f"Updated patch {patch_id} status to {status}")
         return True
 
-    def update_patch_metadata(
-        self,
-        patch_id: str,
-        metadata: dict[str, any]
-    ) -> bool:
+    def update_patch_metadata(self, patch_id: str, metadata: dict[str, any]) -> bool:
         """Update the metadata dictionary for a specific patch.
 
         Merges new metadata with existing patch metadata, allowing incremental
@@ -283,7 +281,9 @@ class PatchManager:
             "average_confidence": avg_confidence,
         }
 
-    def export_patches_summary(self, output_file: str | Path | None = None) -> dict[str, any]:
+    def export_patches_summary(
+        self, output_file: str | Path | None = None
+    ) -> dict[str, any]:
         """Export a comprehensive summary of all patches to a JSON file.
 
         Creates a detailed export containing both statistical analysis and individual
@@ -316,7 +316,7 @@ class PatchManager:
                     "line_range": f"{patch.line_start}-{patch.line_end}",
                 }
                 for patch in self.patches.values()
-            ]
+            ],
         }
 
         with open(output_file, "w", encoding="utf-8") as f:
@@ -399,11 +399,14 @@ class PatchManager:
             List of PatchCandidate objects meeting the evaluation criteria.
         """
         return [
-            patch for patch in self.patches.values()
+            patch
+            for patch in self.patches.values()
             if patch.status == status and patch.confidence_score >= min_confidence
         ]
 
-    def mark_patch_evaluated(self, patch_id: str, evaluation_metadata: dict[str, any]) -> bool:
+    def mark_patch_evaluated(
+        self, patch_id: str, evaluation_metadata: dict[str, any]
+    ) -> bool:
         """Mark a patch as evaluated and store the evaluation results.
 
         Updates the patch status to EVALUATED and stores detailed evaluation
@@ -421,10 +424,9 @@ class PatchManager:
             return False
 
         self.patches[patch_id].status = PatchStatus.EVALUATED
-        self.patches[patch_id].metadata.update({
-            "evaluation": evaluation_metadata,
-            "evaluated_at": str(datetime.now())
-        })
+        self.patches[patch_id].metadata.update(
+            {"evaluation": evaluation_metadata, "evaluated_at": str(datetime.now())}
+        )
         self._save_patches()
 
         return True

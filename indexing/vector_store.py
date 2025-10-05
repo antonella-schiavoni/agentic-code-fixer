@@ -28,11 +28,12 @@ class VectorStore:
 
         self.client = chromadb.PersistentClient(path=str(persist_dir))
         self.collection = self.client.get_or_create_collection(
-            name=config.collection_name,
-            metadata={"hnsw:space": "cosine"}
+            name=config.collection_name, metadata={"hnsw:space": "cosine"}
         )
 
-        logger.info(f"Initialized vector store with collection: {config.collection_name}")
+        logger.info(
+            f"Initialized vector store with collection: {config.collection_name}"
+        )
 
     def is_indexed(self) -> bool:
         """Check if the vector store contains any indexed data.
@@ -90,10 +91,7 @@ class VectorStore:
 
         # Add to collection
         self.collection.add(
-            ids=ids,
-            embeddings=embeddings,
-            documents=texts,
-            metadatas=metadatas
+            ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas
         )
 
         logger.info(f"Added {len(contexts)} code contexts to vector store")
@@ -121,7 +119,7 @@ class VectorStore:
             query_embeddings=[query_embedding],
             n_results=top_k,
             where=where_clause if where_clause else None,
-            include=["documents", "metadatas", "distances"]
+            include=["documents", "metadatas", "distances"],
         )
 
         # Convert results to CodeContext objects
@@ -131,7 +129,7 @@ class VectorStore:
                 zip(
                     results["documents"][0],
                     results["metadatas"][0],
-                    results["distances"][0]
+                    results["distances"][0],
                 )
             ):
                 # Convert distance to similarity score (cosine distance -> similarity)
@@ -141,8 +139,12 @@ class VectorStore:
                     file_path=metadata["file_path"],
                     content=doc,
                     language=metadata["language"],
-                    relevant_functions=metadata["relevant_functions"].split(",") if metadata["relevant_functions"] else [],
-                    dependencies=metadata["dependencies"].split(",") if metadata["dependencies"] else [],
+                    relevant_functions=metadata["relevant_functions"].split(",")
+                    if metadata["relevant_functions"]
+                    else [],
+                    dependencies=metadata["dependencies"].split(",")
+                    if metadata["dependencies"]
+                    else [],
                 )
 
                 contexts_with_scores.append((context, similarity))
@@ -153,10 +155,12 @@ class VectorStore:
     def get_context_by_file(self, file_path: str) -> list[CodeContext]:
         """Get all contexts for a specific file."""
         results = self.collection.query(
-            query_embeddings=[[0.0] * self.embedding_model.get_sentence_embedding_dimension()],
+            query_embeddings=[
+                [0.0] * self.embedding_model.get_sentence_embedding_dimension()
+            ],
             n_results=1000,  # Large number to get all
             where={"file_path": file_path},
-            include=["documents", "metadatas"]
+            include=["documents", "metadatas"],
         )
 
         contexts = []
@@ -166,8 +170,12 @@ class VectorStore:
                     file_path=metadata["file_path"],
                     content=doc,
                     language=metadata["language"],
-                    relevant_functions=metadata["relevant_functions"].split(",") if metadata["relevant_functions"] else [],
-                    dependencies=metadata["dependencies"].split(",") if metadata["dependencies"] else [],
+                    relevant_functions=metadata["relevant_functions"].split(",")
+                    if metadata["relevant_functions"]
+                    else [],
+                    dependencies=metadata["dependencies"].split(",")
+                    if metadata["dependencies"]
+                    else [],
                 )
                 contexts.append(context)
 
@@ -177,8 +185,7 @@ class VectorStore:
         """Clear all data from the collection."""
         self.client.delete_collection(self.config.collection_name)
         self.collection = self.client.get_or_create_collection(
-            name=self.config.collection_name,
-            metadata={"hnsw:space": "cosine"}
+            name=self.config.collection_name, metadata={"hnsw:space": "cosine"}
         )
         logger.info("Cleared vector store collection")
 

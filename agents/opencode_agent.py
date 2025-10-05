@@ -54,7 +54,9 @@ class OpenCodeAgent:
         """
         self.agent_config = agent_config
         self.opencode_config = opencode_config
-        self.opencode_client = OpenCodeClient(opencode_config) if opencode_config.enabled else None
+        self.opencode_client = (
+            OpenCodeClient(opencode_config) if opencode_config.enabled else None
+        )
         self.session_id: str | None = None
 
         logger.info(f"Initialized OpenCode agent {agent_config.agent_id}")
@@ -85,7 +87,9 @@ class OpenCodeAgent:
             Exception: If OpenCode communication fails or response parsing errors.
         """
         if not self.opencode_client or not self.session_id:
-            logger.error(f"Agent {self.agent_config.agent_id} has no active OpenCode session")
+            logger.error(
+                f"Agent {self.agent_config.agent_id} has no active OpenCode session"
+            )
             return None
 
         try:
@@ -106,21 +110,27 @@ class OpenCodeAgent:
                 model=self.agent_config.model_name,
                 temperature=self.agent_config.temperature,
                 max_tokens=self.agent_config.max_tokens,
-                agent_id=self.agent_config.agent_id
+                agent_id=self.agent_config.agent_id,
             )
 
             # Parse response to extract patch
             patch = self._parse_opencode_response(response, target_file)
 
             if patch:
-                logger.info(f"Agent {self.agent_config.agent_id} generated patch for {target_file}")
+                logger.info(
+                    f"Agent {self.agent_config.agent_id} generated patch for {target_file}"
+                )
             else:
-                logger.warning(f"Agent {self.agent_config.agent_id} failed to generate valid patch")
+                logger.warning(
+                    f"Agent {self.agent_config.agent_id} failed to generate valid patch"
+                )
 
             return patch
 
         except Exception as e:
-            logger.error(f"Agent {self.agent_config.agent_id} failed to generate patch: {e}")
+            logger.error(
+                f"Agent {self.agent_config.agent_id} failed to generate patch: {e}"
+            )
             return None
 
     def set_session_id(self, session_id: str) -> None:
@@ -130,11 +140,15 @@ class OpenCodeAgent:
             session_id: OpenCode session ID to associate with this agent.
         """
         self.session_id = session_id
-        logger.debug(f"Agent {self.agent_config.agent_id} assigned to session {session_id}")
+        logger.debug(
+            f"Agent {self.agent_config.agent_id} assigned to session {session_id}"
+        )
 
     def _create_system_prompt(self) -> str:
         """Create system prompt based on agent configuration."""
-        base_prompt = self.agent_config.system_prompt or "You are a skilled software engineer."
+        base_prompt = (
+            self.agent_config.system_prompt or "You are a skilled software engineer."
+        )
 
         role_specific_additions = {
             "security": """
@@ -217,15 +231,17 @@ Respond with a JSON object containing the patch information as specified in the 
 
         formatted_contexts = []
         for i, context in enumerate(contexts):
-            formatted_contexts.append(f"""
+            formatted_contexts.append(
+                f"""
 Context {i + 1} - {context.file_path} ({context.language}):
 ```{context.language}
 {context.content}
 ```
 
-Functions: {', '.join(context.relevant_functions) if context.relevant_functions else 'None'}
-Dependencies: {', '.join(context.dependencies) if context.dependencies else 'None'}
-            """.strip())
+Functions: {", ".join(context.relevant_functions) if context.relevant_functions else "None"}
+Dependencies: {", ".join(context.dependencies) if context.dependencies else "None"}
+            """.strip()
+            )
 
         return "\n\n".join(formatted_contexts)
 
@@ -238,18 +254,24 @@ Dependencies: {', '.join(context.dependencies) if context.dependencies else 'Non
         try:
             # OpenCode response format may vary, adapt as needed
             # Assuming response has 'content' or 'text' field with LLM output
-            content = response.get("content") or response.get("text") or response.get("response", "")
+            content = (
+                response.get("content")
+                or response.get("text")
+                or response.get("response", "")
+            )
             if not content:
                 logger.error("No content found in OpenCode response")
                 return None
 
             # Try to extract JSON from the response
-            json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
+            json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
             if json_match:
                 patch_data = json.loads(json_match.group(1))
             else:
                 # Look for JSON object in the response
-                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
+                json_match = re.search(
+                    r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", content, re.DOTALL
+                )
                 if json_match:
                     patch_data = json.loads(json_match.group(0))
                 else:
@@ -257,7 +279,13 @@ Dependencies: {', '.join(context.dependencies) if context.dependencies else 'Non
                     return None
 
             # Validate required fields
-            required_fields = ["content", "line_start", "line_end", "confidence_score", "description"]
+            required_fields = [
+                "content",
+                "line_start",
+                "line_end",
+                "confidence_score",
+                "description",
+            ]
             for field in required_fields:
                 if field not in patch_data:
                     logger.error(f"Missing required field in patch response: {field}")
@@ -295,7 +323,9 @@ Dependencies: {', '.join(context.dependencies) if context.dependencies else 'Non
         target_file: str,
     ) -> PatchCandidate | None:
         """Legacy method for backward compatibility."""
-        logger.warning("Using deprecated _parse_patch_response, use _parse_opencode_response instead")
+        logger.warning(
+            "Using deprecated _parse_patch_response, use _parse_opencode_response instead"
+        )
         return None
 
     async def validate_patch_syntax(
@@ -307,6 +337,7 @@ Dependencies: {', '.join(context.dependencies) if context.dependencies else 'Non
         try:
             if language == "python":
                 import ast
+
                 ast.parse(patch.content)
                 return True
             elif language in ["javascript", "typescript"]:
