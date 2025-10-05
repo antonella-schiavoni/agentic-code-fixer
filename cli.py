@@ -33,6 +33,7 @@ def run(
     input: str = typer.Option(..., "--input", help="Description of the issue to fix (required)"),
     output_dir: str | None = typer.Option(None, help="Override output directory"),
     context: list[str] | None = typer.Option(None, "--context", help="Additional context files to include along with vectordb data"),
+    exclude_patterns: list[str] | None = typer.Option(None, "--exclude-patterns", help="Additional file patterns to exclude during indexing (e.g., '*.log', 'temp_*')"),
 ) -> None:
     """Execute a complete automated code fixing experiment.
 
@@ -45,6 +46,7 @@ def run(
         input: Description of the issue/problem to fix.
         output_dir: Optional override for the output directory specified in configuration.
         context: Optional list of additional context files to include with vectordb data.
+        exclude_patterns: Optional list of additional file patterns to exclude during indexing.
     """
     try:
         config = load_config(config_path)
@@ -71,6 +73,12 @@ def run(
                 else:
                     config.target_files = context_files
 
+        # Add additional exclude patterns if provided
+        if exclude_patterns:
+            # Merge CLI exclude patterns with config exclude patterns
+            config.exclude_patterns.extend(exclude_patterns)
+            console.print(f"[blue]Added exclude patterns: {', '.join(exclude_patterns)}[/blue]")
+
         if output_dir:
             config.logging.output_dir = output_dir
 
@@ -78,6 +86,8 @@ def run(
         console.print(f"[green]Problem: {input}[/green]")
         if context:
             console.print(f"[green]Additional context files: {len(context_files)}[/green]")
+        if exclude_patterns:
+            console.print(f"[green]Additional exclude patterns: {len(exclude_patterns)}[/green]")
 
         # Run the experiment with modified config
         experiment_metadata = asyncio.run(run_from_config_with_overrides(config))
