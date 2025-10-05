@@ -2,7 +2,7 @@
 
 This module provides comprehensive configuration handling for all components
 of the patch generation pipeline. It defines Pydantic models for type-safe
-configuration validation and supports both YAML and JSON configuration files.
+configuration validation and supports YAML configuration files.
 
 The configuration system is designed with sensible defaults while allowing
 fine-grained control over every aspect of the system's behavior, from agent
@@ -18,7 +18,6 @@ Key configuration areas include:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import yaml
@@ -204,23 +203,20 @@ class Config(BaseModel):
 
 
 def load_config(config_path: str | Path) -> Config:
-    """Load configuration from YAML or JSON file."""
+    """Load configuration from YAML file."""
     config_path = Path(config_path)
 
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
+    if config_path.suffix.lower() not in [".yaml", ".yml"]:
+        raise ValueError(
+            f"Unsupported config file format: {config_path.suffix}. "
+            "Only YAML format (.yaml or .yml) is supported."
+        )
+
     with open(config_path, encoding="utf-8") as f:
-        # TODO: Use only one, yaml or json
-        if config_path.suffix.lower() in [".yaml", ".yml"]:
-            data = yaml.safe_load(f)
-        elif config_path.suffix.lower() == ".json":
-            data = json.load(f)
-        else:
-            raise ValueError(
-                f"Unsupported config file format: {config_path.suffix}. "
-                "Use .yaml, .yml, or .json"
-            )
+        data = yaml.safe_load(f)
 
     return Config(**data)
 

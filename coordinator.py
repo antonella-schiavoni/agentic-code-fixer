@@ -638,7 +638,7 @@ async def run_from_config(config_path: str | Path) -> ExperimentMetadata:
     code fixing experiment, providing a simple interface for experiment execution.
 
     Args:
-        config_path: Path to the YAML or JSON configuration file.
+        config_path: Path to the YAML configuration file.
 
     Returns:
         ExperimentMetadata containing complete experiment results and outcomes.

@@ -41,7 +41,7 @@ def run(
     tracking and results reporting throughout the experiment.
 
     Args:
-        config_path: Path to YAML or JSON configuration file defining experiment parameters.
+        config_path: Path to YAML configuration file defining experiment parameters.
         input: Description of the issue/problem to fix.
         output_dir: Optional override for the output directory specified in configuration.
         context: Optional list of additional context files to include with vectordb data.
