@@ -87,6 +87,57 @@ class CodeIndexer:
             "elixir": [".ex", ".exs"],
         }
 
+    def is_repository_indexed(self) -> bool:
+        """Check if the repository has already been indexed.
+
+        Returns:
+            True if the repository appears to be already indexed, False otherwise.
+        """
+        return self.vector_store.is_indexed()
+
+    def needs_reindexing(self, repo_path: str | Path) -> bool:
+        """Check if the repository needs to be re-indexed.
+
+        This method checks if there are source files that haven't been indexed
+        or if existing files have been modified since indexing.
+
+        Args:
+            repo_path: Path to the repository to check.
+
+        Returns:
+            True if re-indexing is needed, False otherwise.
+        """
+        try:
+            repo_path = Path(repo_path)
+            if not self.vector_store.is_indexed():
+                return True
+
+            # Get currently indexed files
+            indexed_files = self.vector_store.get_indexed_files()
+
+            # Find current source files in repository
+            current_files = self._find_code_files(repo_path, [], None)
+            current_file_paths = {str(f.relative_to(repo_path)) for f in current_files}
+
+            # Check if there are new files not in the index
+            new_files = current_file_paths - indexed_files
+            if new_files:
+                logger.info(f"Found {len(new_files)} new files that need indexing")
+                return True
+
+            # Check if there are indexed files that no longer exist
+            missing_files = indexed_files - current_file_paths
+            if missing_files:
+                logger.info(f"Found {len(missing_files)} indexed files that no longer exist")
+                return True
+
+            logger.info("Repository indexing is up to date")
+            return False
+
+        except Exception as e:
+            logger.warning(f"Failed to check if reindexing is needed: {e}")
+            return True  # Safe default - reindex if unsure
+
     def index_repository(
         self,
         repo_path: str | Path,

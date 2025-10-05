@@ -134,8 +134,8 @@ class AgenticCodeFixer:
         self.experiment_logger.log_experiment_start(self.experiment_metadata)
 
         try:
-            # Phase 1: Index the codebase
-            await self._index_codebase()
+            # Phase 1: Index the codebase (only if needed)
+            await self._index_codebase_if_needed()
 
             # Phase 2: Generate patch candidates
             patches = await self._generate_patches()
@@ -199,6 +199,24 @@ class AgenticCodeFixer:
 
         self.experiment_logger.log_info(f"Indexed {len(contexts)} code contexts")
         logger.info(f"Codebase indexing completed: {len(contexts)} contexts")
+
+    async def _index_codebase_if_needed(self) -> None:
+        """Index the codebase only if it hasn't been indexed or needs updating.
+
+        This method checks if the repository has already been indexed and only
+        performs indexing if necessary, improving performance for repeated experiments.
+        """
+        if self.code_indexer.is_repository_indexed():
+            # Check if we need to reindex due to changes
+            if self.code_indexer.needs_reindexing(self.config.repository_path):
+                self.experiment_logger.log_info("Repository has changes, re-indexing...")
+                await self._index_codebase()
+            else:
+                self.experiment_logger.log_info("Repository already indexed, skipping indexing")
+                logger.info("Skipping codebase indexing - already up to date")
+        else:
+            self.experiment_logger.log_info("Repository not indexed, performing initial indexing...")
+            await self._index_codebase()
 
     async def _generate_patches(self) -> list:
         """Generate diverse patch candidates using multi-agent orchestration.
@@ -446,5 +464,5 @@ async def run_from_config(config_path: str | Path) -> ExperimentMetadata:
     from core import load_config
 
     config = load_config(config_path)
-    fixer = AgenticCodeFixer(config) #TODO: Before running the experiment, index the code. Check if the code is indexed before running run_experiment.
+    fixer = AgenticCodeFixer(config)
     return await fixer.run_experiment()

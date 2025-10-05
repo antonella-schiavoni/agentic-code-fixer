@@ -34,6 +34,34 @@ class VectorStore:
 
         logger.info(f"Initialized vector store with collection: {config.collection_name}")
 
+    def is_indexed(self) -> bool:
+        """Check if the vector store contains any indexed data.
+
+        Returns:
+            True if the collection has indexed contexts, False otherwise.
+        """
+        try:
+            count = self.collection.count()
+            return count > 0
+        except Exception as e:
+            logger.warning(f"Failed to check if vector store is indexed: {e}")
+            return False
+
+    def get_indexed_files(self) -> set[str]:
+        """Get the set of files that have been indexed.
+
+        Returns:
+            Set of file paths that are currently indexed in the vector store.
+        """
+        try:
+            results = self.collection.get(include=["metadatas"])
+            if results and results["metadatas"]:
+                return {metadata["file_path"] for metadata in results["metadatas"]}
+            return set()
+        except Exception as e:
+            logger.warning(f"Failed to get indexed files: {e}")
+            return set()
+
     def add_code_context(self, contexts: list[CodeContext]) -> None:
         """Add code contexts to the vector store."""
         if not contexts:
