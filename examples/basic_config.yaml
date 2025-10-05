@@ -36,7 +36,7 @@ agents:
 
   - agent_id: "performance_optimizer"
     model_name: "claude-sonnet-4-5-20250929"
-    temperature: 0.6  #TODO: Validate if temperature ranges between 0.0 and 2.0
+    temperature: 0.6
     max_tokens: 2048
     system_prompt: "You are a performance expert focused on efficient solutions and optimization."
     specialized_role: "performance"

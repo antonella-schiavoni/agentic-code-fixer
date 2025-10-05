@@ -118,7 +118,7 @@ class EvaluationConfig(BaseModel):
 
     method: EvaluationMethod = EvaluationMethod.AB_TESTING
     model_name: str
-    temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     max_tokens: int = 2048
     elo_k_factor: int = 32
     min_comparisons_per_patch: int = 3

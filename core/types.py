@@ -250,7 +250,7 @@ class AgentConfig(BaseModel):
     Attributes:
         agent_id: Unique identifier for this agent configuration.
         model_name: Name of the language model to use (e.g., 'claude-3-5-sonnet').
-        temperature: Sampling temperature for response generation (0.0 to 2.0).
+        temperature: Sampling temperature for response generation (0.0 to 1.0).
             Lower values produce more deterministic outputs.
         max_tokens: Maximum number of tokens in the agent's response.
         system_prompt: Base instructions that define the agent's behavior.
@@ -260,7 +260,7 @@ class AgentConfig(BaseModel):
 
     agent_id: str
     model_name: str
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    temperature: float = Field(default=0.7, ge=0.0, le=1.0)
     max_tokens: int = Field(default=2048, gt=0)
     system_prompt: str = ""
     specialized_role: str | None = None
