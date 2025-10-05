@@ -717,9 +717,7 @@ class CodeIndexer:
         try:
             tree = ast.parse(content)
             for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef):
-                    functions.append(node.name)
-                elif isinstance(node, ast.ClassDef):
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
                     functions.append(node.name)
         except SyntaxError:
             # Fall back to regex if AST parsing fails

@@ -1,6 +1,6 @@
 """Core modules for Agentic Code Fixer system."""
 
-from core.config import Config, load_config
+from core.config import Config, load_config, create_default_config
 from core.types import (
     AgentConfig,
     CodeContext,
@@ -25,4 +25,5 @@ __all__ = [
     "PatchStatus",
     "TestResult",
     "load_config",
+    "create_default_config",
 ]

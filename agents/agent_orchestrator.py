@@ -436,7 +436,7 @@ class AgentOrchestrator:
         import asyncio
 
         # Store reference to task to avoid RUF006 warning
-        task = asyncio.create_task(self._update_indices_if_needed())
+        _task = asyncio.create_task(self._update_indices_if_needed())
         # Don't await here since this is a synchronous method
         # The task will run in the background
 

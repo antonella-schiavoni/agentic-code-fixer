@@ -232,7 +232,7 @@ class CodeContext(BaseModel):
     embedding: list[float] | None = None
     relevant_functions: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
-    metadata: dict[str, any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentConfig(BaseModel):

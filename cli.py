@@ -12,14 +12,14 @@ execution to result analysis and reporting.
 from __future__ import annotations
 
 import asyncio
-from logging import ReportGenerator
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
-from coordinator import run_from_config
+from coordinator import run_from_config, run_from_config_with_overrides
 from core import create_default_config, load_config
+from experiment_logging import ReportGenerator
 
 app = typer.Typer(
     name="agentic-code-fixer", help="Automated code patch generation and evaluation"
@@ -30,7 +30,9 @@ console = Console()
 @app.command()
 def run(
     config_path: str = typer.Argument(..., help="Path to configuration file"),
+    input: str = typer.Option(..., "--input", help="Description of the issue to fix (required)"),
     output_dir: str | None = typer.Option(None, help="Override output directory"),
+    context: list[str] | None = typer.Option(None, "--context", help="Additional context files to include along with vectordb data"),
 ) -> None:
     """Execute a complete automated code fixing experiment.
 
@@ -40,18 +42,45 @@ def run(
 
     Args:
         config_path: Path to YAML or JSON configuration file defining experiment parameters.
+        input: Description of the issue/problem to fix.
         output_dir: Optional override for the output directory specified in configuration.
+        context: Optional list of additional context files to include with vectordb data.
     """
     try:
         config = load_config(config_path)
+
+        # Set the problem description from command line input
+        config.problem_description = input
+        
+        # Add context files if provided
+        if context:
+            # Validate context files exist
+            context_files = []
+            for ctx_file in context:
+                ctx_path = Path(ctx_file)
+                if ctx_path.exists():
+                    context_files.append(str(ctx_path.resolve()))
+                    console.print(f"[blue]Including context file: {ctx_file}[/blue]")
+                else:
+                    console.print(f"[yellow]Warning: Context file not found: {ctx_file}[/yellow]")
+            
+            # Add context files to target_files for indexing
+            if context_files:
+                if config.target_files:
+                    config.target_files.extend(context_files)
+                else:
+                    config.target_files = context_files
 
         if output_dir:
             config.logging.output_dir = output_dir
 
         console.print(f"[green]Starting experiment with config: {config_path}[/green]")
+        console.print(f"[green]Problem: {input}[/green]")
+        if context:
+            console.print(f"[green]Additional context files: {len(context_files)}[/green]")
 
-        # Run the experiment
-        experiment_metadata = asyncio.run(run_from_config(config_path))
+        # Run the experiment with modified config
+        experiment_metadata = asyncio.run(run_from_config_with_overrides(config))
 
         if experiment_metadata.success:
             console.print("[green]✓ Experiment completed successfully![/green]")
@@ -102,6 +131,13 @@ def create_config(
         )
 
         console.print(f"[green]✓ Created configuration file: {output_path}[/green]")
+
+        # Print config summary (similar to validate_config)
+        console.print(f"Repository: {config.repository_path}")
+        console.print(f"Agents: {len(config.agents)}")
+        console.print(f"Target candidate solutions: {config.num_candidate_solutions}")
+        console.print(f"Model: {config.evaluation.model_name}")
+
         console.print(
             "Edit the configuration file to customize settings before running."
         )

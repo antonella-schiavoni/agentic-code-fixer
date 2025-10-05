@@ -648,3 +648,19 @@ async def run_from_config(config_path: str | Path) -> ExperimentMetadata:
     config = load_config(config_path)
     fixer = AgenticCodeFixer(config)
     return await fixer.run_experiment()
+
+
+async def run_from_config_with_overrides(config: Config) -> ExperimentMetadata:
+    """Execute a complete experiment with a pre-configured Config object.
+
+    Runs a complete automated code fixing experiment using the provided
+    configuration object, allowing for runtime configuration modifications.
+
+    Args:
+        config: Pre-configured Config object with any runtime overrides.
+
+    Returns:
+        ExperimentMetadata containing complete experiment results and outcomes.
+    """
+    fixer = AgenticCodeFixer(config)
+    return await fixer.run_experiment()
