@@ -223,6 +223,7 @@ class CodeContext(BaseModel):
         embedding: Vector representation for semantic similarity search.
         relevant_functions: Function and class names defined in this context.
         dependencies: Import statements and external dependencies referenced.
+        metadata: Additional context information including related files and workspace analysis.
     """
 
     file_path: str
@@ -231,6 +232,7 @@ class CodeContext(BaseModel):
     embedding: list[float] | None = None
     relevant_functions: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
+    metadata: dict[str, any] = Field(default_factory=dict)
 
 
 class AgentConfig(BaseModel):

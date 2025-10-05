@@ -189,7 +189,7 @@ class AgenticCodeFixer:
         with self.experiment_logger.create_progress_context("Indexing codebase...") as progress:
             task = progress.add_task("Indexing files...")
 
-            contexts = self.code_indexer.index_repository(
+            contexts = await self.code_indexer.index_repository(
                 repo_path=self.config.repository_path,
                 exclude_patterns=self.config.exclude_patterns,
                 target_files=self.config.target_files,
