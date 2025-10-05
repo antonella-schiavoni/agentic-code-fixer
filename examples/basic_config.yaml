@@ -58,7 +58,7 @@ opencode:
 
 # Evaluation configuration
 evaluation:
-  method: "ab_testing"  # or "elo_tournament"
+  method: "elo_tournament"
   model_name: "claude-sonnet-4-5-20250929"
   temperature: 0.1
   max_tokens: 2048

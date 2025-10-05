@@ -7,7 +7,7 @@ An automated code patch generation and evaluation system that leverages **OpenCo
 - **OpenCode SST Integration**: Leverages OpenCode's session management and LLM provider system for secure, scalable AI operations
 - **Autonomous AI Agents**: Uses multiple specialized agents with different roles to generate diverse patch candidates
 - **Multi-Provider Support**: Works with Claude, OpenAI, or OpenCode Zen through OpenCode's unified interface
-- **Advanced Evaluation**: Implements AB testing and ELO tournament ranking to select the best patches
+- **Advanced Evaluation**: Implements ELO tournament ranking to select the best patches
 - **Vector-Based Code Search**: Indexes codebases using embeddings for intelligent context retrieval
 - **Session-Based Isolation**: Each agent operates in its own OpenCode session for better resource management
 - **Comprehensive Testing**: Automatically applies patches and runs tests to verify fixes
@@ -140,7 +140,7 @@ agents:
 
 # Evaluation configuration
 evaluation:
-  method: "ab_testing"  # or "elo_tournament"
+  method: "elo_tournament"
   model_name: "claude-3-5-sonnet-20241022"
   confidence_threshold: 0.7
 
@@ -258,19 +258,14 @@ The system supports different agent roles for diverse patch generation:
 - **Concurrency**: Threading and async programming fixes
 - **Reliability**: Fault-tolerant and robust solutions
 
-## Evaluation Methods
-
-### AB Testing
-Pairwise comparison of patches using Claude's evaluation capabilities:
-- Direct head-to-head comparisons
-- Confidence-weighted results
-- Best patch selection based on win rates
+## Evaluation Method
 
 ### ELO Tournament
-Chess-style ranking system for patch quality:
-- Patches gain/lose rating points based on comparisons
-- Converges to stable rankings over multiple rounds
-- Suitable for large numbers of patch candidates
+Chess-style ranking system for patch quality evaluation:
+- Patches gain/lose rating points based on pairwise comparisons
+- Converges to stable rankings over multiple evaluation rounds
+- Scales well to large numbers of patch candidates
+- Provides robust ranking even with inconsistent comparison results
 
 ## Development
 

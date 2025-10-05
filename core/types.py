@@ -50,20 +50,16 @@ class PatchStatus(str, Enum):
 class EvaluationMethod(str, Enum):
     """Available methods for evaluating and ranking patch candidates.
 
-    This enum defines the supported approaches for comparing multiple patch
-    candidates to determine the best solution. Each method has different
-    characteristics in terms of computational cost and ranking accuracy.
+    The system uses ELO tournament rating as the primary evaluation method.
+    This provides robust ranking for multiple patch candidates using a chess-style
+    rating system where patches gain/lose points based on pairwise comparison outcomes.
 
     Attributes:
-        AB_TESTING: Pairwise comparison using direct head-to-head evaluations.
-            Uses an LLM to judge which of two patches is better, then aggregates
-            results to find the overall winner based on win rates.
         ELO_TOURNAMENT: Chess-style rating system where patches gain/lose points
             based on comparison outcomes. Converges to stable rankings over multiple
             rounds and works well with large numbers of candidates.
     """
 
-    AB_TESTING = "ab_testing"
     ELO_TOURNAMENT = "elo_tournament"
 
 

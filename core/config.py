@@ -116,7 +116,7 @@ class EvaluationConfig(BaseModel):
         confidence_threshold: Minimum confidence required for evaluation results.
     """
 
-    method: EvaluationMethod = EvaluationMethod.AB_TESTING
+    method: EvaluationMethod = EvaluationMethod.ELO_TOURNAMENT
     model_name: str
     temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     max_tokens: int = 2048

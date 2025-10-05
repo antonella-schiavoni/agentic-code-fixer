@@ -5,7 +5,7 @@ automated code patch generation, evaluation, and testing. It integrates all syst
 components including code indexing, agent orchestration, patch evaluation, testing,
 and comprehensive logging to provide a complete end-to-end solution.
 
-The coordinator supports multiple evaluation methodologies, comprehensive error handling,
+The coordinator supports ELO tournament evaluation, comprehensive error handling,
 and detailed experiment tracking for reproducible and analyzable automated code fixing.
 """
 
@@ -34,8 +34,8 @@ class AgenticCodeFixer:
     code indexing, multi-agent patch generation, sophisticated evaluation, testing,
     and comprehensive experiment tracking.
 
-    The coordinator supports configurable evaluation methodologies including AB testing
-    and ELO tournaments, provides robust error handling and rollback capabilities, and
+    The coordinator uses ELO tournament evaluation for robust patch ranking,
+    provides comprehensive error handling and rollback capabilities, and
     generates detailed experiment reports for analysis and reproducibility.
 
     Key responsibilities:
@@ -118,7 +118,7 @@ class AgenticCodeFixer:
         The experiment workflow consists of:
         1. Codebase indexing for context retrieval
         2. Multi-agent patch generation with diverse approaches
-        3. Comprehensive patch evaluation using configured methodology
+        3. Comprehensive patch evaluation using ELO tournament ranking
         4. Winning patch application and validation testing
         5. Result logging and comprehensive reporting
 
@@ -234,9 +234,9 @@ class AgenticCodeFixer:
     async def _evaluate_patches(self, patches: list) -> Optional:
         """Evaluate patch candidates and determine the optimal solution.
 
-        Uses the configured evaluation methodology (AB testing or ELO tournament)
-        to systematically compare patch candidates and identify the best solution.
-        Provides detailed reasoning and confidence scores for all comparisons.
+        Uses ELO tournament evaluation to systematically compare patch candidates
+        and identify the best solution. Provides detailed reasoning and confidence
+        scores for all comparisons using a chess-style rating system.
 
         Args:
             patches: List of PatchCandidate objects to evaluate and compare.
@@ -244,16 +244,12 @@ class AgenticCodeFixer:
         Returns:
             The PatchCandidate determined to be the best solution, or None if
             evaluation fails to identify a clear winner.
-
-        Raises:
-            ValueError: If an unsupported evaluation method is configured.
         """
         if len(patches) < 2:
             self.experiment_logger.log_warning("Insufficient patches for evaluation, returning highest confidence patch")
             return max(patches, key=lambda p: p.confidence_score) if patches else None
 
-        method = self.config.evaluation.method
-        self.experiment_logger.log_evaluation_start(len(patches), method.value)
+        self.experiment_logger.log_evaluation_start(len(patches), "elo_tournament")
 
         # Set up OpenCode session for evaluation if enabled
         if self.config.opencode.enabled and self.patch_evaluator.opencode_client:
@@ -270,47 +266,25 @@ class AgenticCodeFixer:
         # Get original code for context
         original_code = self._get_original_code(patches[0].file_path)
 
-        if method == EvaluationMethod.AB_TESTING:
-            # Use pairwise AB testing
-            winning_patch = await self.patch_evaluator.find_best_patch(
-                patches=patches,
-                problem_description=self.config.problem_description,
-                original_code=original_code,
-            )
+        # Use ELO tournament evaluation
+        self.elo_ranker.initialize_patch_ratings(patches)
 
-            # Get evaluation results for logging
-            evaluation_results = await self.patch_evaluator.evaluate_patches_pairwise(
-                patches=patches,
-                problem_description=self.config.problem_description,
-                original_code=original_code,
-            )
+        # Generate pairwise evaluation results for ELO ranking
+        evaluation_results = await self.patch_evaluator.evaluate_patches_pairwise(
+            patches=patches,
+            problem_description=self.config.problem_description,
+            original_code=original_code,
+        )
 
-            for result in evaluation_results:
-                self.experiment_logger.log_evaluation_result(result)
+        # Update ELO ratings based on evaluation results
+        self.elo_ranker.update_ratings_from_evaluations(evaluation_results)
 
-        elif method == EvaluationMethod.ELO_TOURNAMENT:
-            # Use ELO tournament
-            self.elo_ranker.initialize_patch_ratings(patches)
+        # Get the highest-rated patch
+        winning_patch = self.elo_ranker.get_top_patch(patches)
 
-            # Generate evaluation results for ELO ranking
-            #TODO: Does it make sense to use the same evaluation method for ELO ranking?
-            evaluation_results = await self.patch_evaluator.evaluate_patches_pairwise(
-                patches=patches,
-                problem_description=self.config.problem_description,
-                original_code=original_code,
-            )
-
-            # Update ELO ratings
-            self.elo_ranker.update_ratings_from_evaluations(evaluation_results)
-
-            # Get the highest-rated patch
-            winning_patch = self.elo_ranker.get_top_patch(patches)
-
-            for result in evaluation_results:
-                self.experiment_logger.log_evaluation_result(result)
-
-        else:
-            raise ValueError(f"Unsupported evaluation method: {method}")
+        # Log evaluation results
+        for result in evaluation_results:
+            self.experiment_logger.log_evaluation_result(result)
 
         # Update patch statuses
         for patch in patches:
@@ -413,10 +387,7 @@ class AgenticCodeFixer:
         patch_stats = self.patch_manager.get_patch_statistics()
         orchestrator_stats = self.agent_orchestrator.get_orchestrator_stats()
 
-        if self.config.evaluation.method == EvaluationMethod.ELO_TOURNAMENT:
-            tournament_stats = self.elo_ranker.get_tournament_stats()
-        else:
-            tournament_stats = {}
+        tournament_stats = self.elo_ranker.get_tournament_stats()
 
         return {
             "experiment_metadata": self.experiment_metadata.model_dump(),
