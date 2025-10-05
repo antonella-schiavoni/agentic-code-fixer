@@ -266,6 +266,9 @@ class AgenticCodeFixer:
         and identify the best solution. Provides detailed reasoning and confidence
         scores for all comparisons using a chess-style rating system.
 
+        Before LLM evaluation, validates patches by checking compilation and test execution
+        to filter out fundamentally broken solutions and improve evaluation efficiency.
+
         Args:
             patches: List of PatchCandidate objects to evaluate and compare.
 
@@ -279,7 +282,31 @@ class AgenticCodeFixer:
             )
             return max(patches, key=lambda p: p.confidence_score) if patches else None
 
-        self.experiment_logger.log_evaluation_start(len(patches), "elo_tournament")
+        # Pre-evaluation validation: filter patches that compile and pass tests
+        self.experiment_logger.log_info(
+            f"Starting pre-evaluation validation of {len(patches)} patches..."
+        )
+        valid_patches = await self._validate_patches_before_evaluation(patches)
+
+        if not valid_patches:
+            self.experiment_logger.log_warning(
+                "No patches passed pre-evaluation validation, returning highest confidence patch"
+            )
+            return max(patches, key=lambda p: p.confidence_score) if patches else None
+
+        if len(valid_patches) < 2:
+            self.experiment_logger.log_info(
+                "Only one patch passed pre-evaluation validation, returning it as winner"
+            )
+            return valid_patches[0]
+
+        self.experiment_logger.log_info(
+            f"Pre-evaluation validation complete: {len(valid_patches)}/{len(patches)} patches valid"
+        )
+
+        self.experiment_logger.log_evaluation_start(
+            len(valid_patches), "elo_tournament"
+        )
 
         # Set up OpenCode session for evaluation if enabled
         if self.config.opencode.enabled and self.patch_evaluator.opencode_client:
@@ -294,14 +321,14 @@ class AgenticCodeFixer:
                 logger.warning(f"Failed to create evaluation session: {e}")
 
         # Get original code for context
-        original_code = self._get_original_code(patches[0].file_path)
+        original_code = self._get_original_code(valid_patches[0].file_path)
 
         # Use ELO tournament evaluation
-        self.elo_ranker.initialize_patch_ratings(patches)
+        self.elo_ranker.initialize_patch_ratings(valid_patches)
 
         # Generate pairwise evaluation results for ELO ranking
         evaluation_results = await self.patch_evaluator.evaluate_patches_pairwise(
-            patches=patches,
+            patches=valid_patches,
             problem_description=self.config.problem_description,
             original_code=original_code,
         )
@@ -310,7 +337,7 @@ class AgenticCodeFixer:
         self.elo_ranker.update_ratings_from_evaluations(evaluation_results)
 
         # Get the highest-rated patch
-        winning_patch = self.elo_ranker.get_top_patch(patches)
+        winning_patch = self.elo_ranker.get_top_patch(valid_patches)
 
         # Log evaluation results
         for result in evaluation_results:
@@ -318,7 +345,10 @@ class AgenticCodeFixer:
 
         # Update patch statuses
         for patch in patches:
-            self.patch_manager.update_patch_status(patch.id, PatchStatus.EVALUATED)
+            if patch in valid_patches:
+                self.patch_manager.update_patch_status(patch.id, PatchStatus.EVALUATED)
+            else:
+                self.patch_manager.update_patch_status(patch.id, PatchStatus.FAILED)
 
         self.experiment_logger.log_evaluation_complete(
             evaluation_results, winning_patch
@@ -377,6 +407,138 @@ class AgenticCodeFixer:
         finally:
             # Clean up test environment
             self.patch_applicator.cleanup_test_environment(test_env)
+
+    async def _validate_patches_before_evaluation(self, patches: list) -> list:
+        """Validate patches efficiently using a shared test environment.
+
+        Uses a single test environment and applies/reverts patches sequentially
+        to minimize resource usage while still filtering out broken patches before
+        expensive LLM evaluation.
+
+        Args:
+            patches: List of PatchCandidate objects to validate.
+
+        Returns:
+            List of patches that pass both compilation and test validation.
+        """
+        if not patches:
+            return []
+
+        valid_patches = []
+
+        # Sort patches by confidence score (highest first) for better efficiency
+        sorted_patches = sorted(patches, key=lambda p: p.confidence_score, reverse=True)
+
+        self.experiment_logger.log_info(
+            f"Starting efficient pre-evaluation validation of {len(patches)} patches (ordered by confidence)..."
+        )
+
+        # Create a single shared test environment for all validation
+        shared_test_env = self.patch_applicator.create_test_environment(
+            repo_path=self.config.repository_path,
+            temp_dir=self.config.get_output_dir()
+            / self.experiment_metadata.experiment_id
+            / "shared_validation_env",
+        )
+
+        try:
+            for patch in sorted_patches:
+                self.experiment_logger.log_info(
+                    f"Validating patch {patch.id} in shared environment..."
+                )
+
+                try:
+                    # Apply the patch
+                    apply_success = self.patch_applicator.apply_patch(
+                        patch=patch,
+                        repo_path=shared_test_env,
+                        create_backup=True,  # Always create backup for revert
+                    )
+
+                    if not apply_success:
+                        self.experiment_logger.log_info(
+                            f"❌ Patch {patch.id} failed to apply"
+                        )
+                        logger.info(
+                            f"Patch {patch.id} failed validation: could not apply"
+                        )
+                        continue
+
+                    # Run tests with shorter timeout for validation (fail fast)
+                    # Use a shorter timeout than the main test runs for efficiency
+                    validation_timeout = min(
+                        self.patch_applicator.config.test_timeout_seconds
+                        // 2,  # Half the normal timeout
+                        30,  # Max 30 seconds for validation
+                    )
+
+                    # Temporarily override timeout for validation
+                    original_timeout = self.patch_applicator.config.test_timeout_seconds
+                    self.patch_applicator.config.test_timeout_seconds = (
+                        validation_timeout
+                    )
+
+                    try:
+                        test_result = self.patch_applicator.run_tests(
+                            repo_path=shared_test_env, patch_id=patch.id
+                        )
+                    finally:
+                        # Restore original timeout
+                        self.patch_applicator.config.test_timeout_seconds = (
+                            original_timeout
+                        )
+
+                    if test_result.passed:
+                        valid_patches.append(patch)
+                        self.experiment_logger.log_info(
+                            f"✅ Patch {patch.id} passed validation (tests: {test_result.exit_code})"
+                        )
+                        logger.info(
+                            f"Patch {patch.id} passed validation: compilation and tests OK"
+                        )
+                    else:
+                        self.experiment_logger.log_info(
+                            f"❌ Patch {patch.id} failed tests (exit code: {test_result.exit_code})"
+                        )
+                        logger.info(
+                            f"Patch {patch.id} failed validation: tests failed (exit code: {test_result.exit_code})"
+                        )
+
+                    # Always revert the patch to clean state for next validation
+                    revert_success = self.patch_applicator.revert_patch(
+                        patch=patch, repo_path=shared_test_env
+                    )
+
+                    if not revert_success:
+                        logger.warning(
+                            f"Failed to revert patch {patch.id}, validation environment may be corrupted"
+                        )
+                        # Continue anyway, but log the issue
+
+                except Exception as e:
+                    self.experiment_logger.log_error(
+                        f"❌ Patch {patch.id} validation error: {e}"
+                    )
+                    logger.error(
+                        f"Patch {patch.id} validation failed with exception: {e}"
+                    )
+
+                    # Attempt to revert even on error
+                    try:
+                        self.patch_applicator.revert_patch(patch, shared_test_env)
+                    except Exception as revert_error:
+                        logger.error(
+                            f"Failed to revert patch {patch.id} after error: {revert_error}"
+                        )
+
+        finally:
+            # Clean up the shared test environment
+            self.patch_applicator.cleanup_test_environment(shared_test_env)
+
+        logger.info(
+            f"Efficient pre-evaluation validation completed: {len(valid_patches)}/{len(patches)} patches valid"
+        )
+        return valid_patches
 
     def _get_original_code(self, file_path: str) -> str:
         """Retrieve the original source code from the specified file.
