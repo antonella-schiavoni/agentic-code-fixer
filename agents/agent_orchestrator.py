@@ -17,6 +17,7 @@ import logging
 
 from agents.opencode_agent import OpenCodeAgent
 from core.config import Config
+from core.role_manager import RoleManager
 from core.types import AgentConfig, CodeContext, PatchCandidate
 from indexing import CodeIndexer
 from opencode_client import OpenCodeClient, OpenCodeSession
@@ -64,6 +65,7 @@ class AgentOrchestrator:
         self._indices_dirty = False
         self.agents: list[OpenCodeAgent] = []
         self.active_sessions: dict[str, OpenCodeSession] = {}
+        self.role_manager = RoleManager()
 
         # Initialize OpenCode client if enabled
         if self.opencode_config.enabled:
@@ -84,6 +86,7 @@ class AgentOrchestrator:
             agent = OpenCodeAgent(
                 agent_config=agent_config,
                 opencode_config=self.opencode_config,
+                role_manager=self.role_manager,
             )
             self.agents.append(agent)
 
@@ -105,10 +108,17 @@ class AgentOrchestrator:
             )
 
         try:
-            # Get relevant code contexts
+            # Get relevant code contexts with enhanced filtering
             relevant_contexts = self._code_indexer.search_relevant_context(
                 problem_description=problem_description,
                 top_k=10,  # TODO: We may need to increase this number
+                # Enhanced metadata filtering is now available:
+                # language_filter="python" - filter by specific language
+                # function_filter="parse_config" - find specific functions
+                # dependency_filter="fastapi" - find code using specific imports
+                # content_size_range=(100, 2000) - filter by code size
+                # languages=["python", "typescript"] - multiple languages
+                # file_patterns=["/api/", "/core/"] - filter by path patterns
             )
 
             if not relevant_contexts:
@@ -120,26 +130,18 @@ class AgentOrchestrator:
 
             logger.info(f"Generating patches for {len(target_files)} files")
 
-            # Generate patches for each file using all agents
+            # Generate solutions using all agents (solution-based approach)
             all_patches = []
             tasks = []
 
-            # TODO: Evaluate if this logic makes sense. Each agent generates a solution for a single file.
-            for target_file in target_files:
-                # Get contexts specific to this file
-                file_contexts = [
-                    ctx for ctx in relevant_contexts if ctx.file_path == target_file
-                ]
-
-                # Create tasks for each agent to generate patches for this file
-                for agent in self.agents:
-                    task = self._generate_patch_with_agent(
-                        agent=agent,
-                        problem_description=problem_description,
-                        relevant_contexts=file_contexts,
-                        target_file=target_file,
-                    )
-                    tasks.append(task)
+            # Each agent generates a complete solution that may span multiple files
+            for agent in self.agents:
+                task = self._generate_solution_with_agent(
+                    agent=agent,
+                    problem_description=problem_description,
+                    relevant_contexts=relevant_contexts,  # Pass all contexts, not per-file
+                )
+                tasks.append(task)
 
             # Execute all tasks with concurrency limit
             max_parallel = self.opencode_config.max_parallel_sessions
@@ -158,12 +160,20 @@ class AgentOrchestrator:
                     timeout=self.opencode_config.session_timeout_seconds,
                 )
 
-                # Collect successful patches
+                # Collect successful patches from solutions
                 for result in results:
-                    if isinstance(result, PatchCandidate):
+                    if isinstance(result, list):
+                        # Result is a list of patches from solution-based generation
+                        all_patches.extend(result)
+                        if result:
+                            logger.info(f"Agent generated solution with {len(result)} patches")
+                    elif isinstance(result, PatchCandidate):
+                        # Backward compatibility for single patch results
                         all_patches.append(result)
                     elif isinstance(result, Exception):
                         logger.error(f"Agent task failed: {result}")
+                    elif result is None or (isinstance(result, list) and len(result) == 0):
+                        logger.warning("Agent returned no patches")
 
             except TimeoutError:
                 logger.error(
@@ -201,10 +211,37 @@ class AgentOrchestrator:
             logger.error(f"Agent {agent.agent_config.agent_id} failed: {e}")
             return None
 
+    async def _generate_solution_with_agent(
+        self,
+        agent: OpenCodeAgent,
+        problem_description: str,
+        relevant_contexts: list[CodeContext],
+    ) -> list[PatchCandidate]:
+        """Generate a complete solution using a specific agent.
+
+        This method uses the new solution-based approach where agents can generate
+        multiple patches that work together cohesively across multiple files.
+
+        Args:
+            agent: The agent to use for solution generation.
+            problem_description: Description of the problem to solve.
+            relevant_contexts: All relevant code contexts for the problem.
+
+        Returns:
+            List of patches representing a complete solution, or empty list if failed.
+        """
+        try:
+            return await agent.generate_solution(
+                problem_description=problem_description,
+                relevant_contexts=relevant_contexts,
+            )
+        except Exception as e:
+            logger.error(f"Agent {agent.agent_config.agent_id} failed to generate solution: {e}")
+            return []
+
     async def generate_diverse_patches(
         self,
         problem_description: str,
-        diversity_factor: float = 0.3,
     ) -> list[PatchCandidate]:
         """Generate diverse patch candidates by varying agent parameters.
 
@@ -242,6 +279,7 @@ class AgentOrchestrator:
                     variant_agent = OpenCodeAgent(
                         agent_config=variant_config,
                         opencode_config=self.opencode_config,
+                        role_manager=self.role_manager,
                     )
 
                     # Generate patches with variant
@@ -441,6 +479,61 @@ class AgentOrchestrator:
         """
         self._indices_dirty = True
         logger.debug("Marked vector database indices as dirty")
+
+    def get_targeted_context(
+        self,
+        problem_description: str,
+        focus_area: str | None = None,
+        language_preference: str | None = None,
+        top_k: int = 10,
+    ) -> list[CodeContext]:
+        """Get targeted code context using enhanced metadata filtering.
+
+        This method provides intelligent context retrieval by analyzing the
+        problem description and applying appropriate filters.
+
+        Args:
+            problem_description: Description of the problem to solve.
+            focus_area: Area to focus on (e.g., "api", "core", "tests").
+            language_preference: Preferred programming language.
+            top_k: Maximum number of contexts to return.
+
+        Returns:
+            List of targeted CodeContext objects.
+        """
+        # Build filters based on focus area
+        file_patterns = None
+        if focus_area:
+            file_patterns = [f"/{focus_area}/", f"{focus_area}_", f".{focus_area}"]
+
+        # Smart language detection from problem description
+        languages = None
+        if language_preference:
+            languages = [language_preference]
+        elif any(keyword in problem_description.lower() for keyword in ["python", "py", "django", "flask", "fastapi"]):
+            languages = ["python"]
+        elif any(keyword in problem_description.lower() for keyword in ["javascript", "js", "typescript", "ts", "react", "node"]):
+            languages = ["javascript", "typescript"]
+        elif any(keyword in problem_description.lower() for keyword in ["java", "spring", "junit"]):
+            languages = ["java"]
+
+        # Smart function detection from problem description
+        function_filter = None
+        if "function " in problem_description.lower():
+            # Try to extract function name from description
+            import re
+            func_match = re.search(r"function\s+([a-zA-Z_][a-zA-Z0-9_]*)", problem_description, re.IGNORECASE)
+            if func_match:
+                function_filter = func_match.group(1)
+
+        # Use enhanced search with intelligent filters
+        return self._code_indexer.search_relevant_context(
+            problem_description=problem_description,
+            top_k=top_k,
+            languages=languages,
+            file_patterns=file_patterns,
+            function_filter=function_filter,
+        )
 
     def get_orchestrator_stats(self) -> dict[str, any]:
         """Get statistics about the orchestrator and its agents."""

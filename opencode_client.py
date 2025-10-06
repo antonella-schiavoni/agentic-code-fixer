@@ -315,6 +315,8 @@ class OpenCodeClient:
         max_tokens: int | None = None,
         system_prompt: str | None = None,
         agent_id: str | None = None,
+        response_format: str | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Send a prompt to an LLM through OpenCode's provider system.
 
@@ -329,6 +331,8 @@ class OpenCodeClient:
             max_tokens: Maximum tokens in the response.
             system_prompt: Optional system prompt for the LLM.
             agent_id: Optional specific agent ID for tracking.
+            response_format: Format for the response ("json_object" for JSON).
+            json_schema: JSON schema to enforce structured output format.
 
         Returns:
             LLM response containing the generated content and metadata.
@@ -345,6 +349,10 @@ class OpenCodeClient:
             payload["system"] = system_prompt
         if agent_id:
             payload["agent_id"] = agent_id
+        if response_format:
+            payload["response_format"] = response_format
+        if json_schema:
+            payload["json_schema"] = json_schema
 
         response = await self.client.post(f"/session/{session_id}/prompt", json=payload)
         response.raise_for_status()

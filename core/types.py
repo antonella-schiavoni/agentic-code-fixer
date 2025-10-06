@@ -50,17 +50,20 @@ class PatchStatus(str, Enum):
 class EvaluationMethod(str, Enum):
     """Available methods for evaluating and ranking patch candidates.
 
-    The system uses ELO tournament rating as the primary evaluation method.
-    This provides robust ranking for multiple patch candidates using a chess-style
-    rating system where patches gain/lose points based on pairwise comparison outcomes.
+    The system supports multiple evaluation approaches for ranking patch candidates.
+    Each method has different characteristics and is suitable for different scenarios.
 
     Attributes:
         ELO_TOURNAMENT: Chess-style rating system where patches gain/lose points
             based on comparison outcomes. Converges to stable rankings over multiple
             rounds and works well with large numbers of candidates.
+        PAIRWISE_COMPARISON: Simple pairwise comparison with aggregate scoring.
+            Compares each patch against every other patch and ranks by win/loss ratio.
+            Faster than ELO but less sophisticated for large candidate sets.
     """
 
     ELO_TOURNAMENT = "elo_tournament"
+    PAIRWISE_COMPARISON = "pairwise_comparison"
 
 
 class PatchCandidate(BaseModel):

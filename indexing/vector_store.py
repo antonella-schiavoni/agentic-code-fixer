@@ -102,17 +102,65 @@ class VectorStore:
         top_k: int = 10,
         file_filter: str | None = None,
         language_filter: str | None = None,
+        function_filter: str | None = None,
+        dependency_filter: str | None = None,
+        content_size_range: tuple[int, int] | None = None,
+        languages: list[str] | None = None,
+        file_patterns: list[str] | None = None,
     ) -> list[tuple[CodeContext, float]]:
-        """Search for similar code contexts."""
+        """Search for similar code contexts with advanced metadata filtering.
+
+        Args:
+            query: Text query for semantic similarity search.
+            top_k: Maximum number of results to return.
+            file_filter: Filter by file path substring.
+            language_filter: Filter by specific programming language.
+            function_filter: Filter by function name (searches in relevant_functions).
+            dependency_filter: Filter by dependency/import (searches in dependencies).
+            content_size_range: Filter by content size (min, max) in characters.
+            languages: Filter by list of programming languages.
+            file_patterns: Filter by list of file path patterns.
+
+        Returns:
+            List of (CodeContext, similarity_score) tuples.
+        """
         # Generate query embedding
         query_embedding = self.embedding_model.encode([query]).tolist()[0]
 
         # Build where clause for filtering
-        where_clause = {}
+        where_conditions = []
+
+        # Basic filters
         if file_filter:
-            where_clause["file_path"] = {"$contains": file_filter}
+            where_conditions.append({"file_path": {"$contains": file_filter}})
         if language_filter:
-            where_clause["language"] = language_filter
+            where_conditions.append({"language": language_filter})
+        if function_filter:
+            where_conditions.append({"relevant_functions": {"$contains": function_filter}})
+        if dependency_filter:
+            where_conditions.append({"dependencies": {"$contains": dependency_filter}})
+
+        # Content size range filtering
+        if content_size_range:
+            min_size, max_size = content_size_range
+            where_conditions.append({"content_length": {"$gte": min_size}})
+            where_conditions.append({"content_length": {"$lte": max_size}})
+
+        # Multi-value filters
+        if languages:
+            where_conditions.append({"language": {"$in": languages}})
+        if file_patterns:
+            # Use OR logic for multiple file patterns
+            pattern_conditions = [{"file_path": {"$contains": pattern}} for pattern in file_patterns]
+            where_conditions.append({"$or": pattern_conditions})
+
+        # Combine all conditions with AND logic
+        where_clause = {}
+        if where_conditions:
+            if len(where_conditions) == 1:
+                where_clause = where_conditions[0]
+            else:
+                where_clause = {"$and": where_conditions}
 
         # Search in ChromaDB
         results = self.collection.query(
@@ -166,6 +214,138 @@ class VectorStore:
         contexts = []
         if results["documents"] and results["documents"][0]:
             for doc, metadata in zip(results["documents"][0], results["metadatas"][0]):
+                context = CodeContext(
+                    file_path=metadata["file_path"],
+                    content=doc,
+                    language=metadata["language"],
+                    relevant_functions=metadata["relevant_functions"].split(",")
+                    if metadata["relevant_functions"]
+                    else [],
+                    dependencies=metadata["dependencies"].split(",")
+                    if metadata["dependencies"]
+                    else [],
+                )
+                contexts.append(context)
+
+        return contexts
+
+    def search_by_function(self, function_name: str, top_k: int = 10) -> list[CodeContext]:
+        """Search for contexts containing a specific function.
+
+        Args:
+            function_name: Name of the function to search for.
+            top_k: Maximum number of results to return.
+
+        Returns:
+            List of CodeContext objects containing the function.
+        """
+        results = self.collection.get(
+            where={"relevant_functions": {"$contains": function_name}},
+            limit=top_k,
+            include=["documents", "metadatas"],
+        )
+
+        contexts = []
+        if results["documents"]:
+            for doc, metadata in zip(results["documents"], results["metadatas"]):
+                context = CodeContext(
+                    file_path=metadata["file_path"],
+                    content=doc,
+                    language=metadata["language"],
+                    relevant_functions=metadata["relevant_functions"].split(",")
+                    if metadata["relevant_functions"]
+                    else [],
+                    dependencies=metadata["dependencies"].split(",")
+                    if metadata["dependencies"]
+                    else [],
+                )
+                contexts.append(context)
+
+        return contexts
+
+    def search_by_dependency(self, dependency: str, top_k: int = 10) -> list[CodeContext]:
+        """Search for contexts that use a specific dependency/import.
+
+        Args:
+            dependency: Dependency/import to search for.
+            top_k: Maximum number of results to return.
+
+        Returns:
+            List of CodeContext objects using the dependency.
+        """
+        results = self.collection.get(
+            where={"dependencies": {"$contains": dependency}},
+            limit=top_k,
+            include=["documents", "metadatas"],
+        )
+
+        contexts = []
+        if results["documents"]:
+            for doc, metadata in zip(results["documents"], results["metadatas"]):
+                context = CodeContext(
+                    file_path=metadata["file_path"],
+                    content=doc,
+                    language=metadata["language"],
+                    relevant_functions=metadata["relevant_functions"].split(",")
+                    if metadata["relevant_functions"]
+                    else [],
+                    dependencies=metadata["dependencies"].split(",")
+                    if metadata["dependencies"]
+                    else [],
+                )
+                contexts.append(context)
+
+        return contexts
+
+    def get_contexts_by_language(self, language: str) -> list[CodeContext]:
+        """Get all contexts for a specific programming language.
+
+        Args:
+            language: Programming language to filter by.
+
+        Returns:
+            List of CodeContext objects for the specified language.
+        """
+        results = self.collection.get(
+            where={"language": language},
+            include=["documents", "metadatas"],
+        )
+
+        contexts = []
+        if results["documents"]:
+            for doc, metadata in zip(results["documents"], results["metadatas"]):
+                context = CodeContext(
+                    file_path=metadata["file_path"],
+                    content=doc,
+                    language=metadata["language"],
+                    relevant_functions=metadata["relevant_functions"].split(",")
+                    if metadata["relevant_functions"]
+                    else [],
+                    dependencies=metadata["dependencies"].split(",")
+                    if metadata["dependencies"]
+                    else [],
+                )
+                contexts.append(context)
+
+        return contexts
+
+    def get_small_focused_contexts(self, max_size: int = 1000) -> list[CodeContext]:
+        """Get contexts with small, focused code snippets.
+
+        Args:
+            max_size: Maximum content size in characters.
+
+        Returns:
+            List of small CodeContext objects.
+        """
+        results = self.collection.get(
+            where={"content_length": {"$lte": max_size}},
+            include=["documents", "metadatas"],
+        )
+
+        contexts = []
+        if results["documents"]:
+            for doc, metadata in zip(results["documents"], results["metadatas"]):
                 context = CodeContext(
                     file_path=metadata["file_path"],
                     content=doc,

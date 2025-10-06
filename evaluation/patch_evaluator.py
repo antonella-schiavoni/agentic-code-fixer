@@ -171,7 +171,30 @@ class PatchEvaluator:
                 original_code=original_code,
             )
 
-            # Use OpenCode's LLM provider management
+            # Define JSON schema for structured evaluation output
+            evaluation_schema = {
+                "type": "object",
+                "properties": {
+                    "winner_id": {
+                        "type": "string",
+                        "description": "ID of the winning patch (must be either patch_a_id or patch_b_id)"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence in the decision (0.0-1.0)",
+                        "minimum": 0.0,
+                        "maximum": 1.0
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Detailed explanation of why the winner was chosen"
+                    }
+                },
+                "required": ["winner_id", "confidence", "reasoning"],
+                "additionalProperties": False
+            }
+
+            # Use OpenCode's LLM provider management with structured output
             response = await self.opencode_client.send_prompt(
                 session_id=self.session_id,
                 prompt=user_prompt,
@@ -180,6 +203,8 @@ class PatchEvaluator:
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
                 agent_id="patch_evaluator",
+                response_format="json_object",
+                json_schema=evaluation_schema,
             )
 
             # Parse evaluation response

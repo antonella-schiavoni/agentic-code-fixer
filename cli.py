@@ -19,6 +19,7 @@ from rich.console import Console
 
 from coordinator import run_from_config_with_overrides
 from core import create_default_config, load_config
+from core.role_manager import RoleManager
 from experiment_logging import ReportGenerator
 
 app = typer.Typer(
@@ -292,6 +293,70 @@ def baseline_test(
 
     except Exception as e:
         console.print(f"[red]Error running baseline tests: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def list_roles(
+    roles_dir: str = typer.Option("roles", help="Directory containing role definitions"),
+    category: str = typer.Option(None, help="Filter by category"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed role information")
+) -> None:
+    """List all available agent roles and their descriptions.
+
+    This command helps users discover available roles for configuring agents.
+    Each role provides specialized prompting for different types of code issues.
+
+    Args:
+        roles_dir: Directory containing role definition files.
+        category: Optional category filter (e.g., security, performance).
+        verbose: Show detailed role information including descriptions.
+    """
+    try:
+        role_manager = RoleManager(roles_directory=roles_dir)
+
+        # Get role statistics
+        stats = role_manager.get_role_stats()
+        console.print(f"[bold]Available Roles ({stats['total_roles']} total):[/bold]")
+        console.print(f"Roles directory: {stats['roles_directory']}")
+
+        if category:
+            roles = role_manager.get_roles_by_category(category)
+            if not roles:
+                console.print(f"[yellow]No roles found in category '{category}'[/yellow]")
+                return
+            console.print(f"[blue]Filtered by category: {category}[/blue]")
+        else:
+            roles = [role_manager.get_role_definition(name) for name in role_manager.list_available_roles()]
+            roles = [role for role in roles if role is not None]
+
+        # Display roles
+        for role in sorted(roles, key=lambda r: r.name):
+            if verbose:
+                console.print(f"\n[bold green]{role.name}[/bold green]")
+                console.print(f"  Description: {role.description}")
+                if role.category:
+                    console.print(f"  Category: {role.category}")
+                if role.priority:
+                    console.print(f"  Priority: {role.priority}")
+                if role.tags:
+                    console.print(f"  Tags: {', '.join(role.tags)}")
+                console.print(f"  Prompt Addition:")
+                # Indent the prompt addition
+                for line in role.prompt_addition.split('\n'):
+                    console.print(f"    {line}")
+            else:
+                category_str = f" ({role.category})" if role.category else ""
+                console.print(f"  [green]{role.name}[/green]{category_str}: {role.description}")
+
+        # Show category summary if not filtering
+        if not category and stats['categories']:
+            console.print(f"\n[bold]Categories:[/bold]")
+            for cat, count in sorted(stats['categories'].items()):
+                console.print(f"  {cat}: {count} roles")
+
+    except Exception as e:
+        console.print(f"[red]Failed to list roles: {e}[/red]")
         raise typer.Exit(1)
 
 

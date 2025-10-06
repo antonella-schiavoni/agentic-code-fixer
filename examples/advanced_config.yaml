@@ -55,6 +55,20 @@ agents:
     system_prompt: "You are a reliability engineer focused on fault-tolerant systems, error handling, and robust concurrent code."
     specialized_role: "reliability"
 
+  - agent_id: "database_expert"
+    model_name: "claude-sonnet-4-5-20250929"
+    temperature: 0.5
+    max_tokens: 2048
+    system_prompt: "You are a database expert specializing in SQL optimization and data integrity."
+    specialized_role: "database"
+
+  - agent_id: "testing_specialist"
+    model_name: "claude-sonnet-4-5-20250929"
+    temperature: 0.6
+    max_tokens: 2048
+    system_prompt: "You are a testing specialist focused on comprehensive test coverage and automation."
+    specialized_role: "testing"
+
 # Enhanced vector database configuration
 vectordb:
   provider: "chromadb"

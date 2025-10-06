@@ -1,0 +1,13 @@
+# General purpose role definition
+name: "general"
+description: "General-purpose agent for standard code fixes"
+prompt_addition: |
+  Provide well-structured, maintainable solutions that follow best practices
+  for the given programming language. Ensure code readability and proper error
+  handling. Write clean, idiomatic code that follows established conventions
+  and patterns for the target language.
+
+# Optional metadata
+category: "general"
+priority: "medium"
+tags: ["general", "best-practices", "maintainability", "readability"]

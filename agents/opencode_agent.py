@@ -16,6 +16,7 @@ import logging
 import re
 
 from core.config import OpenCodeConfig
+from core.role_manager import RoleManager
 from core.types import AgentConfig, CodeContext, PatchCandidate
 from opencode_client import OpenCodeClient
 
@@ -44,6 +45,7 @@ class OpenCodeAgent:
         self,
         agent_config: AgentConfig,
         opencode_config: OpenCodeConfig,
+        role_manager: RoleManager | None = None,
     ) -> None:
         """Initialize the OpenCode-powered patch generation agent.
 
@@ -51,6 +53,8 @@ class OpenCodeAgent:
             agent_config: Individual agent configuration including model settings,
                 specialized role, and behavioral parameters.
             opencode_config: OpenCode SST framework configuration for orchestration.
+            role_manager: Optional role manager for loading role definitions from files.
+                If None, a default instance will be created.
         """
         self.agent_config = agent_config
         self.opencode_config = opencode_config
@@ -58,8 +62,133 @@ class OpenCodeAgent:
             OpenCodeClient(opencode_config) if opencode_config.enabled else None
         )
         self.session_id: str | None = None
+        self.role_manager = role_manager or RoleManager()
 
         logger.info(f"Initialized OpenCode agent {agent_config.agent_id}")
+
+    async def generate_solution(
+        self,
+        problem_description: str,
+        relevant_contexts: list[CodeContext],
+    ) -> list[PatchCandidate]:
+        """Generate a complete solution that may span multiple files.
+
+        This method allows agents to propose coordinated changes across multiple files
+        to solve complex problems that require cross-file modifications. It replaces
+        the per-file patch generation approach with solution-based generation.
+
+        Args:
+            problem_description: Human-readable description of the issue to fix.
+            relevant_contexts: List of code context chunks relevant to the problem.
+
+        Returns:
+            List of PatchCandidate objects representing a cohesive multi-file solution.
+            Empty list if the agent was unable to generate a valid solution.
+
+        Raises:
+            Exception: If OpenCode communication fails or response parsing errors.
+        """
+        if not self.opencode_client or not self.session_id:
+            logger.error(
+                f"Agent {self.agent_config.agent_id} has no active OpenCode session"
+            )
+            return []
+
+        try:
+            # Prepare context for the agent
+            context_text = self._format_contexts(relevant_contexts)
+
+            # Create specialized prompt based on agent role
+            system_prompt = self._create_solution_system_prompt()
+            user_prompt = self._create_solution_user_prompt(
+                problem_description, context_text
+            )
+
+            # Define JSON schema for structured solution output
+            solution_schema = {
+                "type": "object",
+                "properties": {
+                    "solution_description": {
+                        "type": "string",
+                        "description": "Overall description of the solution approach"
+                    },
+                    "patches": {
+                        "type": "array",
+                        "description": "List of patches that together form the complete solution",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {
+                                    "type": "string",
+                                    "description": "Target file path for this patch"
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "The replacement code for this patch"
+                                },
+                                "line_start": {
+                                    "type": "integer",
+                                    "description": "Starting line number (0-indexed)",
+                                    "minimum": 0
+                                },
+                                "line_end": {
+                                    "type": "integer",
+                                    "description": "Ending line number (0-indexed)",
+                                    "minimum": 0
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "Description of what this specific patch does"
+                                }
+                            },
+                            "required": ["file_path", "content", "line_start", "line_end", "description"],
+                            "additionalProperties": False
+                        },
+                        "minItems": 1
+                    },
+                    "confidence_score": {
+                        "type": "number",
+                        "description": "Agent confidence in the overall solution (0.0-1.0)",
+                        "minimum": 0.0,
+                        "maximum": 1.0
+                    }
+                },
+                "required": ["solution_description", "patches", "confidence_score"],
+                "additionalProperties": False
+            }
+
+            # Generate solution using OpenCode's LLM provider management with structured output
+            response = await self.opencode_client.send_prompt(
+                session_id=self.session_id,
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                model=self.agent_config.model_name,
+                temperature=self.agent_config.temperature,
+                max_tokens=self.agent_config.max_tokens,
+                agent_id=self.agent_config.agent_id,
+                response_format="json_object",
+                json_schema=solution_schema,
+            )
+
+            # Parse response to extract solution patches
+            patches = self._parse_solution_response(response)
+
+            if patches:
+                logger.info(
+                    f"Agent {self.agent_config.agent_id} generated solution with {len(patches)} patches"
+                )
+            else:
+                logger.warning(
+                    f"Agent {self.agent_config.agent_id} failed to generate valid solution"
+                )
+
+            return patches
+
+        except Exception as e:
+            logger.error(
+                f"Agent {self.agent_config.agent_id} failed to generate solution: {e}"
+            )
+            return []
 
     async def generate_patch(
         self,
@@ -98,11 +227,62 @@ class OpenCodeAgent:
 
             # Create specialized prompt based on agent role
             system_prompt = self._create_system_prompt()
-            user_prompt = self._create_user_prompt(
-                problem_description, context_text, target_file
+            user_prompt = self._create_solution_user_prompt(
+                problem_description, context_text
             )
 
-            # Generate patch using OpenCode's LLM provider management
+            # Define JSON schema for structured solution output
+            solution_schema = {
+                "type": "object",
+                "properties": {
+                    "solution_description": {
+                        "type": "string",
+                        "description": "Overall description of the solution approach"
+                    },
+                    "patches": {
+                        "type": "array",
+                        "description": "List of patches that together form the complete solution",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {
+                                    "type": "string",
+                                    "description": "Target file path for this patch"
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "The replacement code for this patch"
+                                },
+                                "line_start": {
+                                    "type": "integer",
+                                    "description": "Starting line number (0-indexed)",
+                                    "minimum": 0
+                                },
+                                "line_end": {
+                                    "type": "integer",
+                                    "description": "Ending line number (0-indexed)",
+                                    "minimum": 0
+                                },
+                                "confidence_score": {
+                                    "type": "number",
+                                    "description": "Agent confidence (0.0-1.0)",
+                                    "minimum": 0.0,
+                                    "maximum": 1.0
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "Brief description of this patch"
+                                }
+                            },
+                            "required": ["file_path", "content", "line_start", "line_end", "confidence_score", "description"]
+                        }
+                    }
+                },
+                "required": ["solution_description", "patches"],
+                "additionalProperties": False
+            }
+
+            # Generate patch using OpenCode's LLM provider management with structured output
             response = await self.opencode_client.send_prompt(
                 session_id=self.session_id,
                 prompt=user_prompt,
@@ -111,21 +291,24 @@ class OpenCodeAgent:
                 temperature=self.agent_config.temperature,
                 max_tokens=self.agent_config.max_tokens,
                 agent_id=self.agent_config.agent_id,
+                response_format="json_object",
+                json_schema=solution_schema,
             )
 
-            # Parse response to extract patch
-            patch = self._parse_opencode_response(response, target_file)
-
-            if patch:
+            # Parse response to extract solution patches
+            patches = self._parse_solution_response(response)
+            # For backward compatibility, return the first patch targeting the specified file
+            if patches:
+                target_patch = next((p for p in patches if p.file_path == target_file), patches[0])
                 logger.info(
-                    f"Agent {self.agent_config.agent_id} generated patch for {target_file}"
+                    f"Agent {self.agent_config.agent_id} generated solution with {len(patches)} patches"
                 )
+                return target_patch
             else:
                 logger.warning(
-                    f"Agent {self.agent_config.agent_id} failed to generate valid patch"
+                    f"Agent {self.agent_config.agent_id} failed to generate valid solution"
                 )
-
-            return patch
+                return None
 
         except Exception as e:
             logger.error(
@@ -150,25 +333,9 @@ class OpenCodeAgent:
             self.agent_config.system_prompt or "You are a skilled software engineer."
         )
 
-        role_specific_additions = {
-            "security": """
-                Pay special attention to security vulnerabilities and ensure any fixes
-                don't introduce new security issues. Focus on input validation,
-                authentication, authorization, and data sanitization.
-            """,
-            "performance": """
-                Focus on optimizing code performance while maintaining correctness.
-                Consider algorithm efficiency, memory usage, and runtime complexity.
-                Avoid solutions that might degrade performance.
-            """,
-            "general": """
-                Provide well-structured, maintainable solutions that follow best practices
-                for the given programming language. Ensure code readability and proper error handling.
-            """,
-        }
-
-        role_addition = role_specific_additions.get(
-            self.agent_config.specialized_role, role_specific_additions["general"]
+        # Get role-specific addition from role manager
+        role_addition = self.role_manager.get_role_prompt_addition(
+            self.agent_config.specialized_role
         )
 
         return f"""
@@ -177,52 +344,23 @@ class OpenCodeAgent:
 {role_addition}
 
 Your task is to generate a code patch that fixes the described problem.
-You must provide:
-1. The exact code to replace the problematic section
-2. Clear line numbers for where the patch should be applied
-3. A confidence score (0.0-1.0) for your solution
-4. A brief description of what the patch does
 
-Format your response as JSON with these fields:
-- content: The replacement code
+Analyze the problem carefully and provide a precise fix that:
+1. Addresses the root cause of the issue
+2. Maintains code quality and style consistency
+3. Handles edge cases appropriately
+4. Follows best practices for the programming language
+
+You will respond with a structured JSON object containing:
+- content: The exact replacement code
 - line_start: Starting line number (0-indexed)
 - line_end: Ending line number (0-indexed)
-- confidence_score: Your confidence (0.0-1.0)
-- description: Brief description of the fix
+- confidence_score: Your confidence in this solution (0.0-1.0)
+- description: Clear explanation of what the fix accomplishes
 
-Example:
-```json
-{{
-  "content": "def fixed_function():\\n    return 'fixed'",
-  "line_start": 10,
-  "line_end": 12,
-  "confidence_score": 0.85,
-  "description": "Fixed function logic and return value"
-}}
-```
+The JSON schema is enforced, so ensure all required fields are provided.
         """.strip()
 
-    def _create_user_prompt(
-        self,
-        problem_description: str,
-        context_text: str,
-        target_file: str,
-    ) -> str:
-        """Create user prompt with problem and context."""
-        return f"""
-Problem Description:
-{problem_description}
-
-Target File: {target_file}
-
-Relevant Code Context:
-{context_text}
-
-Please analyze the problem and provide a patch to fix it. Focus on the specific
-issue described while ensuring the solution is robust and doesn't break existing functionality.
-
-Respond with a JSON object containing the patch information as specified in the system prompt.
-        """.strip()
 
     def _format_contexts(self, contexts: list[CodeContext]) -> str:
         """Format code contexts for inclusion in prompt."""
@@ -250,35 +388,56 @@ Dependencies: {", ".join(context.dependencies) if context.dependencies else "Non
         response: dict[str, any],
         target_file: str,
     ) -> PatchCandidate | None:
-        """Parse OpenCode's LLM response to extract patch information."""
-        try:
-            # OpenCode response format may vary, adapt as needed
-            # Assuming response has 'content' or 'text' field with LLM output
-            content = (
-                response.get("content")
-                or response.get("text")
-                or response.get("response", "")
-            )
-            if not content:
-                logger.error("No content found in OpenCode response")
-                return None
+        """Parse OpenCode's structured JSON response to extract patch information.
 
-            # Try to extract JSON from the response
-            json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
-            if json_match:
-                patch_data = json.loads(json_match.group(1))
+        With structured output enabled, the response should already be valid JSON
+        conforming to the schema, making parsing more reliable.
+        """
+        try:
+            # For structured output, try direct JSON parsing first
+            if isinstance(response, dict) and all(
+                field in response for field in ["content", "line_start", "line_end", "confidence_score", "description"]
+            ):
+                # Response is already structured JSON
+                patch_data = response
+                logger.debug("Using direct structured JSON response")
             else:
-                # Look for JSON object in the response
-                json_match = re.search(
-                    r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", content, re.DOTALL
+                # Fallback to content extraction for backward compatibility
+                content = (
+                    response.get("content")
+                    or response.get("text")
+                    or response.get("response", "")
                 )
-                if json_match:
-                    patch_data = json.loads(json_match.group(0))
-                else:
-                    logger.error("No valid JSON found in OpenCode response")
+                if not content:
+                    logger.error("No content found in OpenCode response")
                     return None
 
-            # Validate required fields
+                # For structured output, content should be valid JSON
+                if isinstance(content, str):
+                    try:
+                        patch_data = json.loads(content)
+                        logger.debug("Parsed JSON from content string")
+                    except json.JSONDecodeError:
+                        # Fallback to regex extraction for non-structured responses
+                        json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
+                        if json_match:
+                            patch_data = json.loads(json_match.group(1))
+                            logger.debug("Extracted JSON from markdown code block")
+                        else:
+                            # Look for JSON object in the response
+                            json_match = re.search(
+                                r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", content, re.DOTALL
+                            )
+                            if json_match:
+                                patch_data = json.loads(json_match.group(0))
+                                logger.debug("Extracted JSON from response text")
+                            else:
+                                logger.error("No valid JSON found in OpenCode response")
+                                return None
+                else:
+                    patch_data = content
+
+            # Validate required fields (schema should guarantee this, but check for robustness)
             required_fields = [
                 "content",
                 "line_start",
@@ -352,6 +511,173 @@ Dependencies: {", ".join(context.dependencies) if context.dependencies else "Non
         except Exception as e:
             logger.warning(f"Syntax validation failed for patch {patch.id}: {e}")
             return False
+
+    def _create_solution_system_prompt(self) -> str:
+        """Create system prompt for solution-based generation."""
+        base_prompt = (
+            self.agent_config.system_prompt or "You are a skilled software engineer."
+        )
+
+        # Get role-specific addition from role manager
+        role_addition = self.role_manager.get_role_prompt_addition(
+            self.agent_config.specialized_role
+        )
+
+        return f"""
+{base_prompt}
+
+{role_addition}
+
+Your task is to generate a complete solution that fixes the described problem.
+This solution may require changes to multiple files that work together cohesively.
+
+Analyze the problem carefully and provide a comprehensive solution that:
+1. Addresses the root cause of the issue across all necessary files
+2. Maintains code quality and style consistency across all changes
+3. Ensures all files work together properly after the changes
+4. Handles edge cases appropriately
+5. Follows best practices for the programming language
+
+You will respond with a structured JSON object containing:
+- solution_description: Overall description of your solution approach
+- patches: Array of individual file patches that together form the complete solution
+- confidence_score: Your confidence in this solution (0.0-1.0)
+
+Each patch in the array contains:
+- file_path: The file to modify
+- content: The exact replacement code for that file
+- line_start: Starting line number (0-indexed)
+- line_end: Ending line number (0-indexed)
+- description: What this specific patch accomplishes
+
+The JSON schema is enforced, so ensure all required fields are provided.
+Think holistically about the problem and provide a complete, coordinated solution.
+        """.strip()
+
+    def _create_solution_user_prompt(
+        self,
+        problem_description: str,
+        context_text: str,
+    ) -> str:
+        """Create user prompt for solution-based generation."""
+        return f"""
+Problem Description:
+{problem_description}
+
+Relevant Code Context:
+{context_text}
+
+Please analyze this problem comprehensively and provide a complete solution that may
+span multiple files if necessary. Consider all the code contexts provided and think
+about how changes in one file might affect others.
+
+Your solution should be cohesive and ensure all files work together properly after
+the changes are applied. If the problem can be solved with changes to a single file,
+that's fine too - provide the most appropriate solution for the specific problem.
+
+Respond with a JSON object containing your complete solution as specified in the system prompt.
+        """.strip()
+
+    def _parse_solution_response(
+        self,
+        response: dict[str, any],
+    ) -> list[PatchCandidate]:
+        """Parse OpenCode's structured JSON response to extract solution patches."""
+        try:
+            # For structured output, try direct JSON parsing first
+            if isinstance(response, dict) and "patches" in response:
+                # Response is already structured JSON
+                solution_data = response
+                logger.debug("Using direct structured JSON response for solution")
+            else:
+                # Fallback to content extraction for backward compatibility
+                content = (
+                    response.get("content")
+                    or response.get("text")
+                    or response.get("response", "")
+                )
+                if not content:
+                    logger.error("No content found in OpenCode solution response")
+                    return []
+
+                # For structured output, content should be valid JSON
+                if isinstance(content, str):
+                    try:
+                        solution_data = json.loads(content)
+                        logger.debug("Parsed JSON from content string")
+                    except json.JSONDecodeError:
+                        # Fallback to regex extraction for non-structured responses
+                        json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
+                        if json_match:
+                            solution_data = json.loads(json_match.group(1))
+                            logger.debug("Extracted JSON from markdown code block")
+                        else:
+                            # Look for JSON object in the response
+                            json_match = re.search(
+                                r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", content, re.DOTALL
+                            )
+                            if json_match:
+                                solution_data = json.loads(json_match.group(0))
+                                logger.debug("Extracted JSON from response text")
+                            else:
+                                logger.error("No valid JSON found in OpenCode solution response")
+                                return []
+                else:
+                    solution_data = content
+
+            # Validate required fields
+            if "patches" not in solution_data:
+                logger.error("Missing 'patches' field in solution response")
+                return []
+
+            if "confidence_score" not in solution_data:
+                logger.error("Missing 'confidence_score' field in solution response")
+                return []
+
+            # Extract solution metadata
+            solution_description = solution_data.get("solution_description", "No description provided")
+            overall_confidence = float(solution_data.get("confidence_score", 0.5))
+
+            # Parse individual patches
+            patch_candidates = []
+            for i, patch_data in enumerate(solution_data["patches"]):
+                # Validate required fields for each patch
+                required_fields = ["file_path", "content", "line_start", "line_end", "description"]
+                for field in required_fields:
+                    if field not in patch_data:
+                        logger.error(f"Missing required field in patch {i}: {field}")
+                        continue
+
+                # Create PatchCandidate
+                patch = PatchCandidate(
+                    content=patch_data["content"],
+                    description=f"{solution_description} - {patch_data['description']}",
+                    agent_id=self.agent_config.agent_id,
+                    file_path=patch_data["file_path"],
+                    line_start=int(patch_data["line_start"]),
+                    line_end=int(patch_data["line_end"]),
+                    confidence_score=overall_confidence,  # Use overall solution confidence
+                    metadata={
+                        "model": self.agent_config.model_name,
+                        "temperature": self.agent_config.temperature,
+                        "specialized_role": self.agent_config.specialized_role,
+                        "opencode_session": self.session_id,
+                        "solution_description": solution_description,
+                        "solution_patch_index": i,
+                        "total_patches_in_solution": len(solution_data["patches"]),
+                        "raw_response": content,
+                        "opencode_response": response,
+                    },
+                )
+                patch_candidates.append(patch)
+
+            logger.info(f"Successfully parsed {len(patch_candidates)} patches from solution")
+            return patch_candidates
+
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            logger.error(f"Failed to parse OpenCode solution response: {e}")
+            logger.debug(f"Raw response: {response}")
+            return []
 
     def get_agent_stats(self) -> dict[str, any]:
         """Get statistics about this agent's performance."""

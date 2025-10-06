@@ -268,10 +268,39 @@ class CodeIndexer:
         problem_description: str,
         top_k: int = 10,  # TODO: We may need to increase this number
         file_filter: str | None = None,
+        language_filter: str | None = None,
+        function_filter: str | None = None,
+        dependency_filter: str | None = None,
+        content_size_range: tuple[int, int] | None = None,
+        languages: list[str] | None = None,
+        file_patterns: list[str] | None = None,
     ) -> list[CodeContext]:
-        """Search for code contexts relevant to a problem description."""
+        """Search for code contexts relevant to a problem description with advanced filtering.
+
+        Args:
+            problem_description: Description of the problem to solve.
+            top_k: Maximum number of results to return.
+            file_filter: Filter by file path substring.
+            language_filter: Filter by specific programming language.
+            function_filter: Filter by function name.
+            dependency_filter: Filter by dependency/import.
+            content_size_range: Filter by content size (min, max) in characters.
+            languages: Filter by list of programming languages.
+            file_patterns: Filter by list of file path patterns.
+
+        Returns:
+            List of relevant CodeContext objects.
+        """
         results = self.vector_store.search_similar_contexts(
-            query=problem_description, top_k=top_k, file_filter=file_filter
+            query=problem_description,
+            top_k=top_k,
+            file_filter=file_filter,
+            language_filter=language_filter,
+            function_filter=function_filter,
+            dependency_filter=dependency_filter,
+            content_size_range=content_size_range,
+            languages=languages,
+            file_patterns=file_patterns,
         )
 
         # Extract just the contexts (without scores)
@@ -280,6 +309,77 @@ class CodeIndexer:
     def get_file_context(self, file_path: str) -> list[CodeContext]:
         """Get all contexts for a specific file."""
         return self.vector_store.get_context_by_file(file_path)
+
+    def search_by_function(self, function_name: str, top_k: int = 10) -> list[CodeContext]:
+        """Search for code contexts containing a specific function.
+
+        Args:
+            function_name: Name of the function to search for.
+            top_k: Maximum number of results to return.
+
+        Returns:
+            List of CodeContext objects containing the function.
+        """
+        return self.vector_store.search_by_function(function_name, top_k)
+
+    def search_by_dependency(self, dependency: str, top_k: int = 10) -> list[CodeContext]:
+        """Search for code contexts that use a specific dependency/import.
+
+        Args:
+            dependency: Dependency/import to search for.
+            top_k: Maximum number of results to return.
+
+        Returns:
+            List of CodeContext objects using the dependency.
+        """
+        return self.vector_store.search_by_dependency(dependency, top_k)
+
+    def get_contexts_by_language(self, language: str) -> list[CodeContext]:
+        """Get all contexts for a specific programming language.
+
+        Args:
+            language: Programming language to filter by.
+
+        Returns:
+            List of CodeContext objects for the specified language.
+        """
+        return self.vector_store.get_contexts_by_language(language)
+
+    def get_small_focused_contexts(self, max_size: int = 1000) -> list[CodeContext]:
+        """Get contexts with small, focused code snippets.
+
+        Args:
+            max_size: Maximum content size in characters.
+
+        Returns:
+            List of small CodeContext objects.
+        """
+        return self.vector_store.get_small_focused_contexts(max_size)
+
+    def search_related_functions(
+        self,
+        function_name: str,
+        problem_description: str,
+        top_k: int = 5,
+    ) -> list[CodeContext]:
+        """Find functions related to a specific function and problem.
+
+        This method combines function-based filtering with semantic similarity
+        to find code that is both functionally related and semantically relevant.
+
+        Args:
+            function_name: Name of the function to find related code for.
+            problem_description: Description of the problem for semantic filtering.
+            top_k: Maximum number of results to return.
+
+        Returns:
+            List of related CodeContext objects.
+        """
+        return self.search_relevant_context(
+            problem_description=problem_description,
+            top_k=top_k,
+            function_filter=function_name,
+        )
 
     async def search_relevant_context_with_dependencies(
         self,
@@ -787,8 +887,8 @@ class CodeIndexer:
 
                 # Start new chunk with overlap
                 overlap_lines = max(0, len(chunk_lines) - self.config.chunk_overlap)
-                chunk_lines = chunk_lines[overlap_lines:] + [line]
-                current_size = sum(len(l) + 1 for l in chunk_lines)
+                chunk_lines = [*chunk_lines[overlap_lines:], line]
+                current_size = sum(len(line_text) + 1 for line_text in chunk_lines)
             else:
                 chunk_lines.append(line)
                 current_size += line_size
