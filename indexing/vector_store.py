@@ -86,7 +86,7 @@ class VectorStore:
         ]
 
         # Update contexts with embeddings
-        for ctx, embedding in zip(contexts, embeddings):
+        for ctx, embedding in zip(contexts, embeddings, strict=False):
             ctx.embedding = embedding
 
         # Add to collection
@@ -136,7 +136,9 @@ class VectorStore:
         if language_filter:
             where_conditions.append({"language": language_filter})
         if function_filter:
-            where_conditions.append({"relevant_functions": {"$contains": function_filter}})
+            where_conditions.append(
+                {"relevant_functions": {"$contains": function_filter}}
+            )
         if dependency_filter:
             where_conditions.append({"dependencies": {"$contains": dependency_filter}})
 
@@ -151,7 +153,9 @@ class VectorStore:
             where_conditions.append({"language": {"$in": languages}})
         if file_patterns:
             # Use OR logic for multiple file patterns
-            pattern_conditions = [{"file_path": {"$contains": pattern}} for pattern in file_patterns]
+            pattern_conditions = [
+                {"file_path": {"$contains": pattern}} for pattern in file_patterns
+            ]
             where_conditions.append({"$or": pattern_conditions})
 
         # Combine all conditions with AND logic
@@ -173,11 +177,12 @@ class VectorStore:
         # Convert results to CodeContext objects
         contexts_with_scores = []
         if results["documents"] and results["documents"][0]:
-            for i, (doc, metadata, distance) in enumerate(
+            for _i, (doc, metadata, distance) in enumerate(
                 zip(
                     results["documents"][0],
                     results["metadatas"][0],
                     results["distances"][0],
+                    strict=False,
                 )
             ):
                 # Convert distance to similarity score (cosine distance -> similarity)
@@ -187,12 +192,16 @@ class VectorStore:
                     file_path=metadata["file_path"],
                     content=doc,
                     language=metadata["language"],
-                    relevant_functions=metadata["relevant_functions"].split(",")
-                    if metadata["relevant_functions"]
-                    else [],
-                    dependencies=metadata["dependencies"].split(",")
-                    if metadata["dependencies"]
-                    else [],
+                    relevant_functions=(
+                        metadata["relevant_functions"].split(",")
+                        if metadata["relevant_functions"]
+                        else []
+                    ),
+                    dependencies=(
+                        metadata["dependencies"].split(",")
+                        if metadata["dependencies"]
+                        else []
+                    ),
                 )
 
                 contexts_with_scores.append((context, similarity))
@@ -213,23 +222,31 @@ class VectorStore:
 
         contexts = []
         if results["documents"] and results["documents"][0]:
-            for doc, metadata in zip(results["documents"][0], results["metadatas"][0]):
+            for doc, metadata in zip(
+                results["documents"][0], results["metadatas"][0], strict=False
+            ):
                 context = CodeContext(
                     file_path=metadata["file_path"],
                     content=doc,
                     language=metadata["language"],
-                    relevant_functions=metadata["relevant_functions"].split(",")
-                    if metadata["relevant_functions"]
-                    else [],
-                    dependencies=metadata["dependencies"].split(",")
-                    if metadata["dependencies"]
-                    else [],
+                    relevant_functions=(
+                        metadata["relevant_functions"].split(",")
+                        if metadata["relevant_functions"]
+                        else []
+                    ),
+                    dependencies=(
+                        metadata["dependencies"].split(",")
+                        if metadata["dependencies"]
+                        else []
+                    ),
                 )
                 contexts.append(context)
 
         return contexts
 
-    def search_by_function(self, function_name: str, top_k: int = 10) -> list[CodeContext]:
+    def search_by_function(
+        self, function_name: str, top_k: int = 10
+    ) -> list[CodeContext]:
         """Search for contexts containing a specific function.
 
         Args:
@@ -247,23 +264,31 @@ class VectorStore:
 
         contexts = []
         if results["documents"]:
-            for doc, metadata in zip(results["documents"], results["metadatas"]):
+            for doc, metadata in zip(
+                results["documents"], results["metadatas"], strict=False
+            ):
                 context = CodeContext(
                     file_path=metadata["file_path"],
                     content=doc,
                     language=metadata["language"],
-                    relevant_functions=metadata["relevant_functions"].split(",")
-                    if metadata["relevant_functions"]
-                    else [],
-                    dependencies=metadata["dependencies"].split(",")
-                    if metadata["dependencies"]
-                    else [],
+                    relevant_functions=(
+                        metadata["relevant_functions"].split(",")
+                        if metadata["relevant_functions"]
+                        else []
+                    ),
+                    dependencies=(
+                        metadata["dependencies"].split(",")
+                        if metadata["dependencies"]
+                        else []
+                    ),
                 )
                 contexts.append(context)
 
         return contexts
 
-    def search_by_dependency(self, dependency: str, top_k: int = 10) -> list[CodeContext]:
+    def search_by_dependency(
+        self, dependency: str, top_k: int = 10
+    ) -> list[CodeContext]:
         """Search for contexts that use a specific dependency/import.
 
         Args:
@@ -281,17 +306,23 @@ class VectorStore:
 
         contexts = []
         if results["documents"]:
-            for doc, metadata in zip(results["documents"], results["metadatas"]):
+            for doc, metadata in zip(
+                results["documents"], results["metadatas"], strict=False
+            ):
                 context = CodeContext(
                     file_path=metadata["file_path"],
                     content=doc,
                     language=metadata["language"],
-                    relevant_functions=metadata["relevant_functions"].split(",")
-                    if metadata["relevant_functions"]
-                    else [],
-                    dependencies=metadata["dependencies"].split(",")
-                    if metadata["dependencies"]
-                    else [],
+                    relevant_functions=(
+                        metadata["relevant_functions"].split(",")
+                        if metadata["relevant_functions"]
+                        else []
+                    ),
+                    dependencies=(
+                        metadata["dependencies"].split(",")
+                        if metadata["dependencies"]
+                        else []
+                    ),
                 )
                 contexts.append(context)
 
@@ -313,17 +344,23 @@ class VectorStore:
 
         contexts = []
         if results["documents"]:
-            for doc, metadata in zip(results["documents"], results["metadatas"]):
+            for doc, metadata in zip(
+                results["documents"], results["metadatas"], strict=False
+            ):
                 context = CodeContext(
                     file_path=metadata["file_path"],
                     content=doc,
                     language=metadata["language"],
-                    relevant_functions=metadata["relevant_functions"].split(",")
-                    if metadata["relevant_functions"]
-                    else [],
-                    dependencies=metadata["dependencies"].split(",")
-                    if metadata["dependencies"]
-                    else [],
+                    relevant_functions=(
+                        metadata["relevant_functions"].split(",")
+                        if metadata["relevant_functions"]
+                        else []
+                    ),
+                    dependencies=(
+                        metadata["dependencies"].split(",")
+                        if metadata["dependencies"]
+                        else []
+                    ),
                 )
                 contexts.append(context)
 
@@ -345,17 +382,23 @@ class VectorStore:
 
         contexts = []
         if results["documents"]:
-            for doc, metadata in zip(results["documents"], results["metadatas"]):
+            for doc, metadata in zip(
+                results["documents"], results["metadatas"], strict=False
+            ):
                 context = CodeContext(
                     file_path=metadata["file_path"],
                     content=doc,
                     language=metadata["language"],
-                    relevant_functions=metadata["relevant_functions"].split(",")
-                    if metadata["relevant_functions"]
-                    else [],
-                    dependencies=metadata["dependencies"].split(",")
-                    if metadata["dependencies"]
-                    else [],
+                    relevant_functions=(
+                        metadata["relevant_functions"].split(",")
+                        if metadata["relevant_functions"]
+                        else []
+                    ),
+                    dependencies=(
+                        metadata["dependencies"].split(",")
+                        if metadata["dependencies"]
+                        else []
+                    ),
                 )
                 contexts.append(context)
 

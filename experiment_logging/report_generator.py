@@ -382,10 +382,11 @@ class ReportGenerator:
         # Calculate statistics
         patch_stats = {
             "total_patches": len(patches),
-            "avg_confidence": sum(p.get("confidence_score", 0) for p in patches)
-            / len(patches)
-            if patches
-            else 0,
+            "avg_confidence": (
+                sum(p.get("confidence_score", 0) for p in patches) / len(patches)
+                if patches
+                else 0
+            ),
             "patches_by_agent": {},
         }
 
@@ -397,21 +398,22 @@ class ReportGenerator:
 
         evaluation_stats = {
             "total_evaluations": len(evaluations),
-            "avg_evaluation_confidence": sum(
-                e.get("confidence", 0) for e in evaluations
-            )
-            / len(evaluations)
-            if evaluations
-            else 0,
+            "avg_evaluation_confidence": (
+                sum(e.get("confidence", 0) for e in evaluations) / len(evaluations)
+                if evaluations
+                else 0
+            ),
         }
 
         test_stats = {
             "total_tests": len(test_results),
             "tests_passed": sum(1 for t in test_results if t.get("passed", False)),
-            "avg_test_duration": sum(t.get("duration_seconds", 0) for t in test_results)
-            / len(test_results)
-            if test_results
-            else 0,
+            "avg_test_duration": (
+                sum(t.get("duration_seconds", 0) for t in test_results)
+                / len(test_results)
+                if test_results
+                else 0
+            ),
         }
 
         return {

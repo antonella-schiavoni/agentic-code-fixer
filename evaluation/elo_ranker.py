@@ -219,7 +219,7 @@ class EloRanker:
         # Simulate random pairings for specified rounds
         import random
 
-        for round_num in range(num_rounds):
+        for _round_num in range(num_rounds):
             # Create random pairings
             shuffled_patches = patches.copy()
             random.shuffle(shuffled_patches)

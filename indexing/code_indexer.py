@@ -72,13 +72,13 @@ class CodeIndexer:
         # This covers 99% of real-world code files without external dependencies
         # TODO: Future language support to add:
         # - C# (.cs, .csx) with Roslyn-style analysis
-        # - F# (.fs, .fsx, .fsi) functional .NET language  
+        # - F# (.fs, .fsx, .fsi) functional .NET language
         # - OCaml (.ml, .mli) with sophisticated type analysis
         # - Nim (.nim) Python-like syntax with C performance
         # - Crystal (.cr) Ruby-like with static typing
         # - Zig (.zig) systems programming language
         # - Julia (.jl) scientific computing
-        # - R (.r, .R) statistical computing  
+        # - R (.r, .R) statistical computing
         # - Dart (.dart) Flutter/web development
         # - Shell scripts (.sh, .bash, .zsh, .fish)
         # - PowerShell (.ps1, .psm1)
@@ -90,7 +90,7 @@ class CodeIndexer:
         # - Infrastructure as Code (Terraform .tf, CloudFormation .yaml)
         # - Database languages (various SQL dialects, MongoDB queries)
         # - Documentation (ReStructuredText .rst, AsciiDoc .adoc)
-        
+
         # File extension to language mapping
         self.language_extensions = {
             # Mainstream languages
@@ -100,51 +100,44 @@ class CodeIndexer:
             "java": [".java"],
             "cpp": [".cpp", ".cc", ".cxx", ".c++", ".hpp", ".h", ".hh", ".hxx"],
             "c": [".c", ".h"],
-            
             # Modern systems languages
             "rust": [".rs"],
             "go": [".go"],
             "swift": [".swift"],
             "kotlin": [".kt", ".kts"],
             "scala": [".scala"],
-            
             # Functional languages
             "clojure": [".clj", ".cljs", ".cljc"],
             "haskell": [".hs", ".lhs"],
             "erlang": [".erl", ".hrl"],
             "elixir": [".ex", ".exs"],
-            
             # Scripting languages
             "ruby": [".rb", ".rake", ".gemspec"],
             "php": [".php", ".php3", ".php4", ".php5", ".phtml"],
             "perl": [".pl", ".pm", ".t"],
             "shell": [".sh", ".bash", ".zsh", ".fish"],
-            
             # Web technologies
             "html": [".html", ".htm", ".xhtml"],
             "css": [".css", ".scss", ".sass", ".less"],
             "xml": [".xml", ".xsd", ".xsl", ".xslt"],
-            
             # Data formats
             "json": [".json", ".jsonl"],
             "yaml": [".yaml", ".yml"],
             "sql": [".sql"],
-            
             # Documentation
             "markdown": [".md", ".markdown"],
         }
-        
+
         # Special filenames without extensions (case-insensitive)
         self.special_filenames = {
             # Build and configuration files
             "dockerfile": "docker",
-            "makefile": "make", 
+            "makefile": "make",
             "cmakelists.txt": "cmake",
             "rakefile": "ruby",
             "gemfile": "ruby",
             "podfile": "ruby",
             "vagrantfile": "ruby",
-            
             # Package management
             "package.json": "javascript",
             "package-lock.json": "javascript",
@@ -158,10 +151,9 @@ class CodeIndexer:
             "pyproject.toml": "python",
             "pipfile": "python",
             "poetry.lock": "python",
-            
             # Build files
             "build.gradle": "gradle",
-            "build.gradle.kts": "kotlin", 
+            "build.gradle.kts": "kotlin",
             "pom.xml": "maven",
             "build.xml": "xml",
             "webpack.config.js": "javascript",
@@ -310,7 +302,9 @@ class CodeIndexer:
         """Get all contexts for a specific file."""
         return self.vector_store.get_context_by_file(file_path)
 
-    def search_by_function(self, function_name: str, top_k: int = 10) -> list[CodeContext]:
+    def search_by_function(
+        self, function_name: str, top_k: int = 10
+    ) -> list[CodeContext]:
         """Search for code contexts containing a specific function.
 
         Args:
@@ -322,7 +316,9 @@ class CodeIndexer:
         """
         return self.vector_store.search_by_function(function_name, top_k)
 
-    def search_by_dependency(self, dependency: str, top_k: int = 10) -> list[CodeContext]:
+    def search_by_dependency(
+        self, dependency: str, top_k: int = 10
+    ) -> list[CodeContext]:
         """Search for code contexts that use a specific dependency/import.
 
         Args:
@@ -773,15 +769,15 @@ class CodeIndexer:
 
     def _is_code_file(self, file_path: Path) -> bool:
         """Determine if a file is a code file using extension and filename matching.
-        
+
         This method provides fast and reliable detection for the vast majority of
         code files without external dependencies. It handles:
         - Files with known code extensions (.py, .js, .java, etc.)
         - Special files identified by name (Dockerfile, Makefile, etc.)
-        
+
         Args:
             file_path: Path to the file to check.
-            
+
         Returns:
             True if the file appears to be a code file, False otherwise.
         """
@@ -789,14 +785,14 @@ class CodeIndexer:
         filename_lower = file_path.name.lower()
         if filename_lower in self.special_filenames:
             return True
-            
+
         # Then check file extensions
         if file_path.suffix:
             suffix_lower = file_path.suffix.lower()
             for extensions in self.language_extensions.values():
                 if suffix_lower in extensions:
                     return True
-                    
+
         return False
 
     def _process_file(self, file_path: Path) -> list[CodeContext]:
@@ -831,18 +827,18 @@ class CodeIndexer:
 
     def _detect_language(self, file_path: Path) -> str:
         """Detect programming language using filename and extension matching.
-        
+
         This method provides fast and reliable language detection for the vast
         majority of code files using:
         1. Special filename detection (Dockerfile, Makefile, package.json, etc.)
         2. File extension matching (.py, .js, .java, etc.)
-        
+
         This approach handles 99% of real-world cases without external dependencies
         or complex content analysis.
-        
+
         Args:
             file_path: Path to the file being analyzed.
-            
+
         Returns:
             String identifier for the detected language, or 'unknown' if undetectable.
         """
@@ -850,7 +846,7 @@ class CodeIndexer:
         filename_lower = file_path.name.lower()
         if filename_lower in self.special_filenames:
             return self.special_filenames[filename_lower]
-            
+
         # Then check file extensions
         if file_path.suffix:
             suffix_lower = file_path.suffix.lower()

@@ -16,6 +16,7 @@ import logging
 import re
 
 from core.config import OpenCodeConfig
+from core.lsp_analyzer import LSPCodeAnalyzer, TargetType
 from core.role_manager import RoleManager
 from core.types import AgentConfig, CodeContext, PatchCandidate
 from opencode_client import OpenCodeClient
@@ -63,6 +64,9 @@ class OpenCodeAgent:
         )
         self.session_id: str | None = None
         self.role_manager = role_manager or RoleManager()
+        self.lsp_analyzer = (
+            LSPCodeAnalyzer(self.opencode_client) if self.opencode_client else None
+        )
 
         logger.info(f"Initialized OpenCode agent {agent_config.agent_id}")
 
@@ -95,8 +99,10 @@ class OpenCodeAgent:
             return []
 
         try:
-            # Prepare context for the agent
-            context_text = self._format_contexts(relevant_contexts)
+            # Prepare context for the agent with LSP enhancement
+            context_text = await self._format_contexts_with_lsp(
+                relevant_contexts, problem_description
+            )
 
             # Create specialized prompt based on agent role
             system_prompt = self._create_solution_system_prompt()
@@ -110,7 +116,7 @@ class OpenCodeAgent:
                 "properties": {
                     "solution_description": {
                         "type": "string",
-                        "description": "Overall description of the solution approach"
+                        "description": "Overall description of the solution approach",
                     },
                     "patches": {
                         "type": "array",
@@ -120,41 +126,47 @@ class OpenCodeAgent:
                             "properties": {
                                 "file_path": {
                                     "type": "string",
-                                    "description": "Target file path for this patch"
+                                    "description": "Target file path for this patch",
                                 },
                                 "content": {
                                     "type": "string",
-                                    "description": "The replacement code for this patch"
+                                    "description": "The exact replacement code for the specific lines identified by line_start and line_end",
                                 },
                                 "line_start": {
                                     "type": "integer",
-                                    "description": "Starting line number (0-indexed)",
-                                    "minimum": 0
+                                    "description": "Starting line number (0-indexed) of the first line to replace",
+                                    "minimum": 0,
                                 },
                                 "line_end": {
                                     "type": "integer",
-                                    "description": "Ending line number (0-indexed)",
-                                    "minimum": 0
+                                    "description": "Ending line number (0-indexed) of the last line to replace (inclusive)",
+                                    "minimum": 0,
                                 },
                                 "description": {
                                     "type": "string",
-                                    "description": "Description of what this specific patch does"
-                                }
+                                    "description": "Description of what this specific patch does",
+                                },
                             },
-                            "required": ["file_path", "content", "line_start", "line_end", "description"],
-                            "additionalProperties": False
+                            "required": [
+                                "file_path",
+                                "content",
+                                "line_start",
+                                "line_end",
+                                "description",
+                            ],
+                            "additionalProperties": False,
                         },
-                        "minItems": 1
+                        "minItems": 1,
                     },
                     "confidence_score": {
                         "type": "number",
                         "description": "Agent confidence in the overall solution (0.0-1.0)",
                         "minimum": 0.0,
-                        "maximum": 1.0
-                    }
+                        "maximum": 1.0,
+                    },
                 },
                 "required": ["solution_description", "patches", "confidence_score"],
-                "additionalProperties": False
+                "additionalProperties": False,
             }
 
             # Generate solution using OpenCode's LLM provider management with structured output
@@ -222,8 +234,10 @@ class OpenCodeAgent:
             return None
 
         try:
-            # Prepare context for the agent
-            context_text = self._format_contexts(relevant_contexts)
+            # Prepare context for the agent with LSP enhancement
+            context_text = await self._format_contexts_with_lsp(
+                relevant_contexts, problem_description
+            )
 
             # Create specialized prompt based on agent role
             system_prompt = self._create_system_prompt()
@@ -237,7 +251,7 @@ class OpenCodeAgent:
                 "properties": {
                     "solution_description": {
                         "type": "string",
-                        "description": "Overall description of the solution approach"
+                        "description": "Overall description of the solution approach",
                     },
                     "patches": {
                         "type": "array",
@@ -247,39 +261,46 @@ class OpenCodeAgent:
                             "properties": {
                                 "file_path": {
                                     "type": "string",
-                                    "description": "Target file path for this patch"
+                                    "description": "Target file path for this patch",
                                 },
                                 "content": {
                                     "type": "string",
-                                    "description": "The replacement code for this patch"
+                                    "description": "The exact replacement code for the specific lines identified by line_start and line_end",
                                 },
                                 "line_start": {
                                     "type": "integer",
-                                    "description": "Starting line number (0-indexed)",
-                                    "minimum": 0
+                                    "description": "Starting line number (0-indexed) of the first line to replace",
+                                    "minimum": 0,
                                 },
                                 "line_end": {
                                     "type": "integer",
-                                    "description": "Ending line number (0-indexed)",
-                                    "minimum": 0
+                                    "description": "Ending line number (0-indexed) of the last line to replace (inclusive)",
+                                    "minimum": 0,
                                 },
                                 "confidence_score": {
                                     "type": "number",
                                     "description": "Agent confidence (0.0-1.0)",
                                     "minimum": 0.0,
-                                    "maximum": 1.0
+                                    "maximum": 1.0,
                                 },
                                 "description": {
                                     "type": "string",
-                                    "description": "Brief description of this patch"
-                                }
+                                    "description": "Brief description of this patch",
+                                },
                             },
-                            "required": ["file_path", "content", "line_start", "line_end", "confidence_score", "description"]
-                        }
-                    }
+                            "required": [
+                                "file_path",
+                                "content",
+                                "line_start",
+                                "line_end",
+                                "confidence_score",
+                                "description",
+                            ],
+                        },
+                    },
                 },
                 "required": ["solution_description", "patches"],
-                "additionalProperties": False
+                "additionalProperties": False,
             }
 
             # Generate patch using OpenCode's LLM provider management with structured output
@@ -299,7 +320,9 @@ class OpenCodeAgent:
             patches = self._parse_solution_response(response)
             # For backward compatibility, return the first patch targeting the specified file
             if patches:
-                target_patch = next((p for p in patches if p.file_path == target_file), patches[0])
+                target_patch = next(
+                    (p for p in patches if p.file_path == target_file), patches[0]
+                )
                 logger.info(
                     f"Agent {self.agent_config.agent_id} generated solution with {len(patches)} patches"
                 )
@@ -361,7 +384,6 @@ You will respond with a structured JSON object containing:
 The JSON schema is enforced, so ensure all required fields are provided.
         """.strip()
 
-
     def _format_contexts(self, contexts: list[CodeContext]) -> str:
         """Format code contexts for inclusion in prompt."""
         if not contexts:
@@ -369,11 +391,17 @@ The JSON schema is enforced, so ensure all required fields are provided.
 
         formatted_contexts = []
         for i, context in enumerate(contexts):
+            # Add line numbers to help agents identify correct line ranges
+            lines = context.content.split("\n")
+            numbered_content = "\n".join(
+                f"{idx:2d}|{line}" for idx, line in enumerate(lines)
+            )
+
             formatted_contexts.append(
                 f"""
 Context {i + 1} - {context.file_path} ({context.language}):
 ```{context.language}
-{context.content}
+{numbered_content}
 ```
 
 Functions: {", ".join(context.relevant_functions) if context.relevant_functions else "None"}
@@ -382,6 +410,118 @@ Dependencies: {", ".join(context.dependencies) if context.dependencies else "Non
             )
 
         return "\n\n".join(formatted_contexts)
+
+    async def _format_contexts_with_lsp(
+        self, contexts: list[CodeContext], problem_description: str
+    ) -> str:
+        """Format code contexts with LSP-enhanced semantic information.
+
+        This enhanced formatter uses LSP analysis to provide precise line ranges
+        and semantic information about code constructs, helping the agent make
+        more accurate targeting decisions.
+        """
+        if not contexts or not self.lsp_analyzer or not self.session_id:
+            return self._format_contexts(contexts)
+
+        formatted_contexts = []
+        for i, context in enumerate(contexts):
+            # Basic numbered content
+            lines = context.content.split("\n")
+            numbered_content = "\n".join(
+                f"{idx:2d}|{line}" for idx, line in enumerate(lines)
+            )
+
+            # Get LSP symbol analysis for this file
+            try:
+                symbols = await self.lsp_analyzer.analyze_file(
+                    self.session_id, context.file_path
+                )
+
+                # Find symbols relevant to the problem
+                relevant_symbols = (
+                    await self.lsp_analyzer.find_symbol_by_problem_description(
+                        self.session_id, context.file_path, problem_description
+                    )
+                )
+
+                # Create LSP-enhanced context
+                lsp_info = self._format_lsp_symbol_info(symbols, relevant_symbols)
+
+                formatted_contexts.append(
+                    f"""
+Context {i + 1} - {context.file_path} ({context.language}):
+```{context.language}
+{numbered_content}
+```
+
+Functions: {", ".join(context.relevant_functions) if context.relevant_functions else "None"}
+Dependencies: {", ".join(context.dependencies) if context.dependencies else "None"}
+
+LSP SEMANTIC ANALYSIS:
+{lsp_info}
+                """.strip()
+                )
+
+            except Exception as e:
+                logger.warning(
+                    f"Failed to get LSP analysis for {context.file_path}: {e}"
+                )
+                # Fallback to basic formatting
+                formatted_contexts.append(
+                    f"""
+Context {i + 1} - {context.file_path} ({context.language}):
+```{context.language}
+{numbered_content}
+```
+
+Functions: {", ".join(context.relevant_functions) if context.relevant_functions else "None"}
+Dependencies: {", ".join(context.dependencies) if context.dependencies else "None"}
+                """.strip()
+                )
+
+        return "\n\n".join(formatted_contexts)
+
+    def _format_lsp_symbol_info(
+        self, symbols: list, relevant_symbols: list[tuple]
+    ) -> str:
+        """Format LSP symbol information for inclusion in context."""
+        if not symbols:
+            return "No symbols found."
+
+        info_parts = []
+
+        # Add overview of all symbols
+        symbol_summary = []
+        for symbol in symbols:
+            symbol_summary.append(
+                f"  - {symbol.name} ({symbol.kind}): lines {symbol.range.start_line}-{symbol.range.end_line}"
+            )
+
+        info_parts.append("Symbols in this file:")
+        info_parts.extend(symbol_summary)
+
+        # Add detailed info for relevant symbols
+        if relevant_symbols:
+            info_parts.append("\nRELEVANT TO PROBLEM:")
+            for symbol, target_type in relevant_symbols[:3]:  # Top 3 most relevant
+                details = [f"Symbol: {symbol.name} ({symbol.kind})"]
+                details.append(
+                    f"Full range: lines {symbol.range.start_line}-{symbol.range.end_line}"
+                )
+
+                if target_type == TargetType.DOCSTRING and symbol.docstring_range:
+                    details.append(
+                        f"Docstring ONLY: lines {symbol.docstring_range.start_line}-{symbol.docstring_range.end_line}"
+                    )
+                elif target_type == TargetType.FUNCTION_BODY and symbol.body_range:
+                    details.append(
+                        f"Function body ONLY: lines {symbol.body_range.start_line}-{symbol.body_range.end_line}"
+                    )
+
+                details.append(f"Suggested target type: {target_type.value}")
+                info_parts.append("\n".join([f"  {detail}" for detail in details]))
+
+        return "\n".join(info_parts)
 
     def _parse_opencode_response(
         self,
@@ -396,7 +536,14 @@ Dependencies: {", ".join(context.dependencies) if context.dependencies else "Non
         try:
             # For structured output, try direct JSON parsing first
             if isinstance(response, dict) and all(
-                field in response for field in ["content", "line_start", "line_end", "confidence_score", "description"]
+                field in response
+                for field in [
+                    "content",
+                    "line_start",
+                    "line_end",
+                    "confidence_score",
+                    "description",
+                ]
             ):
                 # Response is already structured JSON
                 patch_data = response
@@ -419,7 +566,9 @@ Dependencies: {", ".join(context.dependencies) if context.dependencies else "Non
                         logger.debug("Parsed JSON from content string")
                     except json.JSONDecodeError:
                         # Fallback to regex extraction for non-structured responses
-                        json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
+                        json_match = re.search(
+                            r"```json\s*(\{.*?\})\s*```", content, re.DOTALL
+                        )
                         if json_match:
                             patch_data = json.loads(json_match.group(1))
                             logger.debug("Extracted JSON from markdown code block")
@@ -545,10 +694,28 @@ You will respond with a structured JSON object containing:
 
 Each patch in the array contains:
 - file_path: The file to modify
-- content: The exact replacement code for that file
-- line_start: Starting line number (0-indexed)
-- line_end: Ending line number (0-indexed)
+- content: The exact replacement code for the specific lines being changed
+- line_start: Starting line number (0-indexed) of the code section to replace
+- line_end: Ending line number (0-indexed) of the code section to replace
 - description: What this specific patch accomplishes
+
+CRITICAL INSTRUCTIONS FOR LSP-GUIDED PATCH TARGETING:
+1. The code context includes LSP SEMANTIC ANALYSIS with precise line ranges
+2. When LSP analysis shows "Docstring ONLY: lines X-Y", use EXACTLY those line numbers
+3. When LSP analysis shows "Function body ONLY: lines X-Y", use EXACTLY those line numbers
+4. NEVER include function definition lines when targeting docstrings
+5. NEVER include docstring lines when targeting function bodies
+6. The LSP analysis provides "Suggested target type" - follow this guidance
+7. Use the precise line numbers from LSP analysis, not manual counting
+
+IMPORTANT: If LSP analysis shows:
+- "Docstring ONLY: lines 8-9" → use line_start: 8, line_end: 9
+- "Function body ONLY: lines 11-15" → use line_start: 11, line_end: 15
+- "Suggested target type: docstring" → replace ONLY the docstring content
+
+Example LSP-guided docstring patch:
+LSP shows "Docstring ONLY: lines 8-9" →
+- line_start: 8, line_end: 9, content: "    \"\"\"Improved docstring text\"\"\"\n"
 
 The JSON schema is enforced, so ensure all required fields are provided.
 Think holistically about the problem and provide a complete, coordinated solution.
@@ -571,9 +738,16 @@ Please analyze this problem comprehensively and provide a complete solution that
 span multiple files if necessary. Consider all the code contexts provided and think
 about how changes in one file might affect others.
 
+The code contexts above include line numbers (e.g., "8|    def function():"). Use these
+line numbers to identify the EXACT lines that need to be changed. Be very precise with
+your line_start and line_end values.
+
 Your solution should be cohesive and ensure all files work together properly after
 the changes are applied. If the problem can be solved with changes to a single file,
 that's fine too - provide the most appropriate solution for the specific problem.
+
+Remember: only replace the specific lines that need to be changed. For docstring
+improvements, replace only the docstring lines, not the entire function.
 
 Respond with a JSON object containing your complete solution as specified in the system prompt.
         """.strip()
@@ -603,7 +777,9 @@ Respond with a JSON object containing your complete solution as specified in the
                         logger.debug("Parsed JSON from content string")
                     except json.JSONDecodeError:
                         # Fallback to regex extraction for non-structured responses
-                        json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
+                        json_match = re.search(
+                            r"```json\s*(\{.*?\})\s*```", content, re.DOTALL
+                        )
                         if json_match:
                             solution_data = json.loads(json_match.group(1))
                             logger.debug("Extracted JSON from markdown code block")
@@ -616,7 +792,9 @@ Respond with a JSON object containing your complete solution as specified in the
                                 solution_data = json.loads(json_match.group(0))
                                 logger.debug("Extracted JSON from response text")
                             else:
-                                logger.error("No valid JSON found in OpenCode solution response")
+                                logger.error(
+                                    "No valid JSON found in OpenCode solution response"
+                                )
                                 return []
                 else:
                     solution_data = content
@@ -631,14 +809,22 @@ Respond with a JSON object containing your complete solution as specified in the
                 return []
 
             # Extract solution metadata
-            solution_description = solution_data.get("solution_description", "No description provided")
+            solution_description = solution_data.get(
+                "solution_description", "No description provided"
+            )
             overall_confidence = float(solution_data.get("confidence_score", 0.5))
 
             # Parse individual patches
             patch_candidates = []
             for i, patch_data in enumerate(solution_data["patches"]):
                 # Validate required fields for each patch
-                required_fields = ["file_path", "content", "line_start", "line_end", "description"]
+                required_fields = [
+                    "file_path",
+                    "content",
+                    "line_start",
+                    "line_end",
+                    "description",
+                ]
                 for field in required_fields:
                     if field not in patch_data:
                         logger.error(f"Missing required field in patch {i}: {field}")
@@ -667,7 +853,9 @@ Respond with a JSON object containing your complete solution as specified in the
                 )
                 patch_candidates.append(patch)
 
-            logger.info(f"Successfully parsed {len(patch_candidates)} patches from solution")
+            logger.info(
+                f"Successfully parsed {len(patch_candidates)} patches from solution"
+            )
             return patch_candidates
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
@@ -677,7 +865,7 @@ Respond with a JSON object containing your complete solution as specified in the
 
     def _extract_content_from_opencode_response(self, response: dict[str, any]) -> str:
         """Extract text content from OpenCode response format.
-        
+
         OpenCode returns responses with this structure:
         {
             "info": {...},
@@ -696,12 +884,14 @@ Respond with a JSON object containing your complete solution as specified in the
                         text = part.get("text", "")
                         if text:
                             text_content.append(text)
-                
+
                 combined_text = "\n".join(text_content).strip()
                 if combined_text:
-                    logger.debug(f"Extracted {len(combined_text)} characters from OpenCode parts")
+                    logger.debug(
+                        f"Extracted {len(combined_text)} characters from OpenCode parts"
+                    )
                     return combined_text
-            
+
             # Fallback to old format
             content = (
                 response.get("content")
@@ -711,10 +901,10 @@ Respond with a JSON object containing your complete solution as specified in the
             if content:
                 logger.debug("Using fallback content extraction")
                 return content
-                
+
             logger.warning("No text content found in OpenCode response")
             return ""
-            
+
         except Exception as e:
             logger.error(f"Failed to extract content from OpenCode response: {e}")
             return ""

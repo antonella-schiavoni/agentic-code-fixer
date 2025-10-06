@@ -31,10 +31,20 @@ console = Console()
 @app.command()
 def run(
     config_path: str = typer.Argument(..., help="Path to configuration file"),
-    input: str = typer.Option(..., "--input", help="Description of the issue to fix (required)"),
+    input: str = typer.Option(
+        ..., "--input", help="Description of the issue to fix (required)"
+    ),
     output_dir: str | None = typer.Option(None, help="Override output directory"),
-    context: list[str] | None = typer.Option(None, "--context", help="Additional context files to include along with vectordb data"),
-    exclude_patterns: list[str] | None = typer.Option(None, "--exclude-patterns", help="Additional file patterns to exclude during indexing (e.g., '*.log', 'temp_*')"),
+    context: list[str] | None = typer.Option(
+        None,
+        "--context",
+        help="Additional context files to include along with vectordb data",
+    ),
+    exclude_patterns: list[str] | None = typer.Option(
+        None,
+        "--exclude-patterns",
+        help="Additional file patterns to exclude during indexing (e.g., '*.log', 'temp_*')",
+    ),
 ) -> None:
     """Execute a complete automated code fixing experiment.
 
@@ -54,7 +64,7 @@ def run(
 
         # Set the problem description from command line input
         config.problem_description = input
-        
+
         # Add context files if provided (note: with target_files removed, context files are now indexed automatically through comprehensive repository scanning)
         if context:
             # Validate context files exist and log them for user awareness
@@ -63,15 +73,21 @@ def run(
                 ctx_path = Path(ctx_file)
                 if ctx_path.exists():
                     context_files.append(str(ctx_path.resolve()))
-                    console.print(f"[blue]Context file found: {ctx_file} (will be included via automatic repository indexing)[/blue]")
+                    console.print(
+                        f"[blue]Context file found: {ctx_file} (will be included via automatic repository indexing)[/blue]"
+                    )
                 else:
-                    console.print(f"[yellow]Warning: Context file not found: {ctx_file}[/yellow]")
+                    console.print(
+                        f"[yellow]Warning: Context file not found: {ctx_file}[/yellow]"
+                    )
 
         # Add additional exclude patterns if provided
         if exclude_patterns:
             # Merge CLI exclude patterns with config exclude patterns
             config.exclude_patterns.extend(exclude_patterns)
-            console.print(f"[blue]Added exclude patterns: {', '.join(exclude_patterns)}[/blue]")
+            console.print(
+                f"[blue]Added exclude patterns: {', '.join(exclude_patterns)}[/blue]"
+            )
 
         if output_dir:
             config.logging.output_dir = output_dir
@@ -79,9 +95,13 @@ def run(
         console.print(f"[green]Starting experiment with config: {config_path}[/green]")
         console.print(f"[green]Problem: {input}[/green]")
         if context:
-            console.print(f"[green]Additional context files: {len(context_files)}[/green]")
+            console.print(
+                f"[green]Additional context files: {len(context_files)}[/green]"
+            )
         if exclude_patterns:
-            console.print(f"[green]Additional exclude patterns: {len(exclude_patterns)}[/green]")
+            console.print(
+                f"[green]Additional exclude patterns: {len(exclude_patterns)}[/green]"
+            )
 
         # Run the experiment with modified config
         experiment_metadata = asyncio.run(run_from_config_with_overrides(config))
@@ -298,9 +318,13 @@ def baseline_test(
 
 @app.command()
 def list_roles(
-    roles_dir: str = typer.Option("roles", help="Directory containing role definitions"),
+    roles_dir: str = typer.Option(
+        "roles", help="Directory containing role definitions"
+    ),
     category: str = typer.Option(None, help="Filter by category"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed role information")
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show detailed role information"
+    ),
 ) -> None:
     """List all available agent roles and their descriptions.
 
@@ -323,11 +347,16 @@ def list_roles(
         if category:
             roles = role_manager.get_roles_by_category(category)
             if not roles:
-                console.print(f"[yellow]No roles found in category '{category}'[/yellow]")
+                console.print(
+                    f"[yellow]No roles found in category '{category}'[/yellow]"
+                )
                 return
             console.print(f"[blue]Filtered by category: {category}[/blue]")
         else:
-            roles = [role_manager.get_role_definition(name) for name in role_manager.list_available_roles()]
+            roles = [
+                role_manager.get_role_definition(name)
+                for name in role_manager.list_available_roles()
+            ]
             roles = [role for role in roles if role is not None]
 
         # Display roles
@@ -341,18 +370,20 @@ def list_roles(
                     console.print(f"  Priority: {role.priority}")
                 if role.tags:
                     console.print(f"  Tags: {', '.join(role.tags)}")
-                console.print(f"  Prompt Addition:")
+                console.print("  Prompt Addition:")
                 # Indent the prompt addition
-                for line in role.prompt_addition.split('\n'):
+                for line in role.prompt_addition.split("\n"):
                     console.print(f"    {line}")
             else:
                 category_str = f" ({role.category})" if role.category else ""
-                console.print(f"  [green]{role.name}[/green]{category_str}: {role.description}")
+                console.print(
+                    f"  [green]{role.name}[/green]{category_str}: {role.description}"
+                )
 
         # Show category summary if not filtering
-        if not category and stats['categories']:
-            console.print(f"\n[bold]Categories:[/bold]")
-            for cat, count in sorted(stats['categories'].items()):
+        if not category and stats["categories"]:
+            console.print("\n[bold]Categories:[/bold]")
+            for cat, count in sorted(stats["categories"].items()):
                 console.print(f"  {cat}: {count} roles")
 
     except Exception as e:

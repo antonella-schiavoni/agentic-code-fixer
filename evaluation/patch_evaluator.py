@@ -177,21 +177,21 @@ class PatchEvaluator:
                 "properties": {
                     "winner_id": {
                         "type": "string",
-                        "description": "ID of the winning patch (must be either patch_a_id or patch_b_id)"
+                        "description": "ID of the winning patch (must be either patch_a_id or patch_b_id)",
                     },
                     "confidence": {
                         "type": "number",
                         "description": "Confidence in the decision (0.0-1.0)",
                         "minimum": 0.0,
-                        "maximum": 1.0
+                        "maximum": 1.0,
                     },
                     "reasoning": {
                         "type": "string",
-                        "description": "Detailed explanation of why the winner was chosen"
-                    }
+                        "description": "Detailed explanation of why the winner was chosen",
+                    },
                 },
                 "required": ["winner_id", "confidence", "reasoning"],
-                "additionalProperties": False
+                "additionalProperties": False,
             }
 
             # Use OpenCode's LLM provider management with structured output

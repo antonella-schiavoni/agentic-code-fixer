@@ -199,9 +199,11 @@ class ExperimentLogger:
                     patch.agent_id,
                     Path(patch.file_path).name,
                     f"{patch.confidence_score:.2f}",
-                    patch.description[:50] + "..."
-                    if len(patch.description) > 50
-                    else patch.description,
+                    (
+                        patch.description[:50] + "..."
+                        if len(patch.description) > 50
+                        else patch.description
+                    ),
                 )
 
             self.console.print(table)

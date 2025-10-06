@@ -50,7 +50,9 @@ class RoleManager:
         default_role: Name of the default role to use when none is specified.
     """
 
-    def __init__(self, roles_directory: str | Path = "roles", default_role: str = "general"):
+    def __init__(
+        self, roles_directory: str | Path = "roles", default_role: str = "general"
+    ):
         """Initialize the role manager.
 
         Args:
@@ -69,10 +71,14 @@ class RoleManager:
             self._create_fallback_roles()
             return
 
-        yaml_files = list(self.roles_directory.glob("*.yaml")) + list(self.roles_directory.glob("*.yml"))
+        yaml_files = list(self.roles_directory.glob("*.yaml")) + list(
+            self.roles_directory.glob("*.yml")
+        )
 
         if not yaml_files:
-            logger.warning(f"No YAML files found in roles directory: {self.roles_directory}")
+            logger.warning(
+                f"No YAML files found in roles directory: {self.roles_directory}"
+            )
             self._create_fallback_roles()
             return
 
@@ -102,7 +108,7 @@ class RoleManager:
                 ),
                 category="general",
                 priority="medium",
-                tags=["general", "best-practices"]
+                tags=["general", "best-practices"],
             ),
             "security": RoleDefinition(
                 name="security",
@@ -114,7 +120,7 @@ class RoleManager:
                 ),
                 category="security",
                 priority="high",
-                tags=["security", "vulnerabilities"]
+                tags=["security", "vulnerabilities"],
             ),
             "performance": RoleDefinition(
                 name="performance",
@@ -126,7 +132,7 @@ class RoleManager:
                 ),
                 category="optimization",
                 priority="medium",
-                tags=["performance", "optimization"]
+                tags=["performance", "optimization"],
             ),
         }
 
@@ -147,7 +153,9 @@ class RoleManager:
 
         role_def = self.roles.get(role_name)
         if not role_def:
-            logger.warning(f"Role '{role_name}' not found, using default role '{self.default_role}'")
+            logger.warning(
+                f"Role '{role_name}' not found, using default role '{self.default_role}'"
+            )
             role_def = self.roles.get(self.default_role)
 
         if not role_def:

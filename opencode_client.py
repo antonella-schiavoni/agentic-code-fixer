@@ -136,10 +136,12 @@ class OpenCodeClient:
             logger.debug(f"Session creation response text: {response.text}")
             response.raise_for_status()
         except Exception as e:
-            logger.error(f"Failed to create session. URL: {self.client.base_url}/session")
+            logger.error(
+                f"Failed to create session. URL: {self.client.base_url}/session"
+            )
             logger.error(f"Payload: {payload}")
             logger.error(f"Error: {e}")
-            if hasattr(e, 'response') and e.response:
+            if hasattr(e, "response") and e.response:
                 logger.error(f"Response status: {e.response.status_code}")
                 logger.error(f"Response text: {e.response.text}")
             raise
@@ -319,6 +321,173 @@ class OpenCodeClient:
         logger.debug(f"Found {len(symbols)} symbols in {file_path}")
         return symbols
 
+    async def get_lsp_diagnostics(
+        self, session_id: str, file_path: str
+    ) -> list[dict[str, Any]]:
+        """Get LSP diagnostics for a file.
+
+        Uses OpenCode's LSP integration to get language server diagnostics,
+        which can help identify issues and code structure.
+
+        Args:
+            session_id: ID of the session containing the file.
+            file_path: Path to the file to get diagnostics for.
+
+        Returns:
+            List of diagnostic information from the LSP server.
+        """
+        try:
+            response = await self.client.get(
+                f"/session/{session_id}/lsp/diagnostics", params={"file": file_path}
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            diagnostics = result.get("diagnostics", [])
+
+            logger.debug(f"Found {len(diagnostics)} diagnostics for {file_path}")
+            return diagnostics
+
+        except Exception as e:
+            logger.error(f"Failed to get LSP diagnostics for {file_path}: {e}")
+            return []
+
+    async def get_symbol_location(
+        self, session_id: str, file_path: str, symbol_name: str
+    ) -> dict[str, Any] | None:
+        """Get precise location information for a symbol using LSP.
+
+        Uses OpenCode's LSP integration to find the exact location and range
+        of a symbol (function, class, variable, etc.) in the code.
+
+        Args:
+            session_id: ID of the session containing the file.
+            file_path: Path to the file containing the symbol.
+            symbol_name: Name of the symbol to locate.
+
+        Returns:
+            Dictionary containing symbol location info including line ranges,
+            or None if the symbol is not found.
+        """
+        try:
+            response = await self.client.get(
+                f"/session/{session_id}/lsp/symbol-location",
+                params={"file": file_path, "symbol": symbol_name},
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            location = result.get("location")
+
+            if location:
+                logger.debug(
+                    f"Found location for symbol '{symbol_name}' in {file_path}"
+                )
+            else:
+                logger.debug(f"Symbol '{symbol_name}' not found in {file_path}")
+
+            return location
+
+        except Exception as e:
+            logger.error(
+                f"Failed to get symbol location for '{symbol_name}' in {file_path}: {e}"
+            )
+            return None
+
+    async def get_document_symbols(
+        self, session_id: str, file_path: str
+    ) -> list[dict[str, Any]]:
+        """Get document symbols with precise location information using LSP.
+
+        Uses OpenCode's LSP integration to get a hierarchical list of all
+        symbols in a document with their exact positions and ranges.
+
+        Args:
+            session_id: ID of the session containing the file.
+            file_path: Path to the file to analyze.
+
+        Returns:
+            List of document symbols with location and hierarchy information.
+        """
+        try:
+            response = await self.client.get(
+                f"/session/{session_id}/lsp/document-symbols",
+                params={"file": file_path},
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            symbols = result.get("symbols", [])
+
+            logger.debug(f"Found {len(symbols)} document symbols in {file_path}")
+            return symbols
+
+        except Exception as e:
+            logger.error(f"Failed to get document symbols for {file_path}: {e}")
+            return []
+
+    async def get_hover_info(
+        self, session_id: str, file_path: str, line: int, character: int
+    ) -> dict[str, Any] | None:
+        """Get hover information at a specific position using LSP.
+
+        Uses OpenCode's LSP integration to get detailed information about
+        the code element at a specific line and character position.
+
+        Args:
+            session_id: ID of the session containing the file.
+            file_path: Path to the file.
+            line: Zero-indexed line number.
+            character: Zero-indexed character position in the line.
+
+        Returns:
+            Dictionary containing hover information, or None if no info available.
+        """
+        try:
+            response = await self.client.get(
+                f"/session/{session_id}/lsp/hover",
+                params={"file": file_path, "line": line, "character": character},
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            hover_info = result.get("hover")
+
+            if hover_info:
+                logger.debug(f"Found hover info at {file_path}:{line}:{character}")
+
+            return hover_info
+
+        except Exception as e:
+            logger.error(
+                f"Failed to get hover info at {file_path}:{line}:{character}: {e}"
+            )
+            return None
+
+    async def read_file(self, session_id: str, file_path: str) -> str | None:
+        """Read the content of a file in the session.
+
+        Args:
+            session_id: ID of the session containing the file.
+            file_path: Path to the file to read.
+
+        Returns:
+            File content as string, or None if reading fails.
+        """
+        try:
+            response = await self.client.get(f"/session/{session_id}/files/{file_path}")
+            response.raise_for_status()
+
+            result = response.json()
+            content = result.get("content", "")
+
+            logger.debug(f"Read {len(content)} characters from {file_path}")
+            return content
+
+        except Exception as e:
+            logger.error(f"Failed to read file {file_path}: {e}")
+            return None
+
     async def send_prompt(
         self,
         session_id: str,
@@ -352,7 +521,7 @@ class OpenCodeClient:
         """
         # Build parts array with proper format
         parts = [{"type": "text", "text": prompt}]
-        
+
         # Build payload with correct OpenCode API format
         payload = {"parts": parts}
 
@@ -360,22 +529,13 @@ class OpenCodeClient:
         if model:
             # Parse model name to extract provider and model ID
             if "claude" in model.lower():
-                payload["model"] = {
-                    "providerID": "anthropic", 
-                    "modelID": model
-                }
+                payload["model"] = {"providerID": "anthropic", "modelID": model}
             elif "gpt" in model.lower() or "openai" in model.lower():
-                payload["model"] = {
-                    "providerID": "openai",
-                    "modelID": model
-                }
+                payload["model"] = {"providerID": "openai", "modelID": model}
             else:
                 # Default to anthropic for unknown models
-                payload["model"] = {
-                    "providerID": "anthropic",
-                    "modelID": model
-                }
-        
+                payload["model"] = {"providerID": "anthropic", "modelID": model}
+
         # Add other parameters if supported by OpenCode API
         # Note: OpenCode may not support all these parameters directly
         # We'll include them in case they are supported
@@ -392,7 +552,9 @@ class OpenCodeClient:
         if json_schema:
             payload["json_schema"] = json_schema
 
-        response = await self.client.post(f"/session/{session_id}/message", json=payload)
+        response = await self.client.post(
+            f"/session/{session_id}/message", json=payload
+        )
         response.raise_for_status()
 
         result = response.json()
@@ -452,7 +614,9 @@ class OpenCodeClient:
 
         # Change to repository directory (only if shell execution is enabled)
         if self.config.enable_shell_execution:
-            await self.execute_shell_command(session.session_id, f"cd {repository_path}")
+            await self.execute_shell_command(
+                session.session_id, f"cd {repository_path}"
+            )
         else:
             logger.debug("Skipping shell command (shell execution disabled)")
 

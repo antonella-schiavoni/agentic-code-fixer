@@ -17,6 +17,8 @@ import logging
 
 from agents.opencode_agent import OpenCodeAgent
 from core.config import Config
+from core.lsp_analyzer import TargetType
+from core.patch_validator import LSPPatchValidator, ValidationResult
 from core.role_manager import RoleManager
 from core.types import AgentConfig, CodeContext, PatchCandidate
 from indexing import CodeIndexer
@@ -66,12 +68,15 @@ class AgentOrchestrator:
         self.agents: list[OpenCodeAgent] = []
         self.active_sessions: dict[str, OpenCodeSession] = {}
         self.role_manager = RoleManager()
+        self._background_tasks: set = set()  # Store background tasks to prevent GC
 
         # Initialize OpenCode client if enabled
         if self.opencode_config.enabled:
             self.opencode_client = OpenCodeClient(self.opencode_config)
+            self.patch_validator = LSPPatchValidator(self.opencode_client)
         else:
             self.opencode_client = None
+            self.patch_validator = None
 
         # Initialize agents
         self._initialize_agents()
@@ -166,13 +171,17 @@ class AgentOrchestrator:
                         # Result is a list of patches from solution-based generation
                         all_patches.extend(result)
                         if result:
-                            logger.info(f"Agent generated solution with {len(result)} patches")
+                            logger.info(
+                                f"Agent generated solution with {len(result)} patches"
+                            )
                     elif isinstance(result, PatchCandidate):
                         # Backward compatibility for single patch results
                         all_patches.append(result)
                     elif isinstance(result, Exception):
                         logger.error(f"Agent task failed: {result}")
-                    elif result is None or (isinstance(result, list) and len(result) == 0):
+                    elif result is None or (
+                        isinstance(result, list) and len(result) == 0
+                    ):
                         logger.warning("Agent returned no patches")
 
             except TimeoutError:
@@ -236,7 +245,9 @@ class AgentOrchestrator:
                 relevant_contexts=relevant_contexts,
             )
         except Exception as e:
-            logger.error(f"Agent {agent.agent_config.agent_id} failed to generate solution: {e}")
+            logger.error(
+                f"Agent {agent.agent_config.agent_id} failed to generate solution: {e}"
+            )
             return []
 
     async def generate_diverse_patches(
@@ -337,10 +348,79 @@ class AgentOrchestrator:
     async def validate_patches(
         self, patches: list[PatchCandidate]
     ) -> list[PatchCandidate]:
-        """Validate patch candidates for syntax and basic correctness."""
+        """Validate patch candidates using both LSP semantic validation and syntax checks."""
         validated_patches = []
 
-        for patch in patches:
+        # First, perform LSP semantic validation if available
+        if self.patch_validator and self.opencode_client:
+            try:
+                # Get the first active session for validation
+                session_id = None
+                for session in self.active_sessions.values():
+                    session_id = session.session_id
+                    break
+
+                if session_id:
+                    logger.info(
+                        f"Performing LSP semantic validation on {len(patches)} patches"
+                    )
+                    validation_reports = await self.patch_validator.validate_patches(
+                        session_id, patches
+                    )
+
+                    # Process validation results
+                    corrected_patches = []
+                    for _i, (patch, report) in enumerate(
+                        zip(patches, validation_reports, strict=False)
+                    ):
+                        if report.result == ValidationResult.VALID:
+                            validated_patches.append(patch)
+                            logger.info(f"✓ Patch {patch.id} passed LSP validation")
+                        elif report.suggested_range:
+                            # Try to create a corrected patch
+                            inferred_target_type = (
+                                self._infer_target_type_from_description(
+                                    patch.description
+                                )
+                            )
+                            corrected_patch = (
+                                await self.patch_validator.suggest_corrected_patch(
+                                    session_id, patch, inferred_target_type
+                                )
+                            )
+                            if corrected_patch:
+                                corrected_patches.append(corrected_patch)
+                                logger.info(
+                                    f"🔧 Created corrected patch for {patch.id}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"❌ Patch {patch.id} failed LSP validation: {report.message}"
+                                )
+                        else:
+                            logger.warning(
+                                f"❌ Patch {patch.id} failed LSP validation: {report.message}"
+                            )
+
+                    # Add corrected patches to the validated set
+                    validated_patches.extend(corrected_patches)
+
+                    logger.info(
+                        f"LSP validation: {len(validated_patches)} valid/corrected out of {len(patches)} total patches"
+                    )
+                else:
+                    logger.warning(
+                        "No active OpenCode session available for LSP validation"
+                    )
+
+            except Exception as e:
+                logger.error(f"LSP validation failed: {e}")
+                logger.warning("Falling back to basic syntax validation")
+
+        # Fall back to basic syntax validation for patches that haven't been validated yet
+        remaining_patches = patches if not validated_patches else []
+
+        for patch in remaining_patches:
             # Determine language from file extension
             file_ext = patch.file_path.split(".")[-1].lower()
             language_map = {
@@ -369,8 +449,27 @@ class AgentOrchestrator:
                 # If agent not found, assume valid
                 validated_patches.append(patch)
 
-        logger.info(f"Validated {len(validated_patches)} out of {len(patches)} patches")
+        logger.info(
+            f"Final validation result: {len(validated_patches)} out of {len(patches)} patches passed"
+        )
         return validated_patches
+
+    def _infer_target_type_from_description(self, description: str) -> TargetType:
+        """Infer target type from patch description for validation."""
+        description_lower = description.lower()
+
+        if any(
+            keyword in description_lower
+            for keyword in ["docstring", "documentation", "doc", "description"]
+        ):
+            return TargetType.DOCSTRING
+        elif any(
+            keyword in description_lower
+            for keyword in ["implementation", "logic", "bug", "fix", "body"]
+        ):
+            return TargetType.FUNCTION_BODY
+        else:
+            return TargetType.ENTIRE_FUNCTION
 
     async def _initialize_agent_sessions(
         self, problem_description: str, repository_path: str
@@ -410,8 +509,9 @@ class AgentOrchestrator:
                     f"Failed to initialize session for agent {agent.agent_config.agent_id}: {e}"
                 )
                 logger.error(f"Exception type: {type(e).__name__}")
-                logger.error(f"Exception details: {str(e)}")
+                logger.error(f"Exception details: {e!s}")
                 import traceback
+
                 logger.error(f"Full traceback: {traceback.format_exc()}")
 
     async def _cleanup_agent_sessions(self) -> None:
@@ -470,10 +570,12 @@ class AgentOrchestrator:
         """
         import asyncio
 
-        # Store reference to task to avoid RUF006 warning
-        _task = asyncio.create_task(self._update_indices_if_needed())
-        # Don't await here since this is a synchronous method
-        # The task will run in the background
+        # Create task and store reference to avoid garbage collection
+        task = asyncio.create_task(self._update_indices_if_needed())
+        self._background_tasks.add(task)
+
+        # Remove task from set when it's done to avoid memory leak
+        task.add_done_callback(self._background_tasks.discard)
 
     def mark_indices_dirty(self) -> None:
         """Mark indices as needing update due to code changes.
@@ -514,11 +616,20 @@ class AgentOrchestrator:
         languages = None
         if language_preference:
             languages = [language_preference]
-        elif any(keyword in problem_description.lower() for keyword in ["python", "py", "django", "flask", "fastapi"]):
+        elif any(
+            keyword in problem_description.lower()
+            for keyword in ["python", "py", "django", "flask", "fastapi"]
+        ):
             languages = ["python"]
-        elif any(keyword in problem_description.lower() for keyword in ["javascript", "js", "typescript", "ts", "react", "node"]):
+        elif any(
+            keyword in problem_description.lower()
+            for keyword in ["javascript", "js", "typescript", "ts", "react", "node"]
+        ):
             languages = ["javascript", "typescript"]
-        elif any(keyword in problem_description.lower() for keyword in ["java", "spring", "junit"]):
+        elif any(
+            keyword in problem_description.lower()
+            for keyword in ["java", "spring", "junit"]
+        ):
             languages = ["java"]
 
         # Smart function detection from problem description
@@ -526,7 +637,12 @@ class AgentOrchestrator:
         if "function " in problem_description.lower():
             # Try to extract function name from description
             import re
-            func_match = re.search(r"function\s+([a-zA-Z_][a-zA-Z0-9_]*)", problem_description, re.IGNORECASE)
+
+            func_match = re.search(
+                r"function\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+                problem_description,
+                re.IGNORECASE,
+            )
             if func_match:
                 function_filter = func_match.group(1)
 
