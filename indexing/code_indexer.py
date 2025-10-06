@@ -198,7 +198,7 @@ class CodeIndexer:
             indexed_files = self.vector_store.get_indexed_files()
 
             # Find current source files in repository
-            current_files = self._find_code_files(repo_path, [], None)
+            current_files = self._find_code_files(repo_path, [])
             current_file_paths = {str(f.relative_to(repo_path)) for f in current_files}
 
             # Check if there are new files not in the index
@@ -226,7 +226,6 @@ class CodeIndexer:
         self,
         repo_path: str | Path,
         exclude_patterns: list[str] | None = None,
-        target_files: list[str] | None = None,
     ) -> list[CodeContext]:
         """Index all relevant files in a repository with enhanced context grouping."""
         repo_path = Path(repo_path)
@@ -241,7 +240,7 @@ class CodeIndexer:
         )
 
         # Find all code files
-        code_files = self._find_code_files(repo_path, exclude_patterns, target_files)
+        code_files = self._find_code_files(repo_path, exclude_patterns)
         logger.info(f"Found {len(code_files)} code files to index")
 
         # Process files and create contexts with OpenCode-enhanced relationships
@@ -640,21 +639,8 @@ class CodeIndexer:
         self,
         repo_path: Path,
         exclude_patterns: list[str],
-        target_files: list[str] | None = None,
     ) -> list[Path]:
-        """Find all code files in the repository."""
-        # TODO: Remove target_files, we should index the entire repository, not just specific files
-        if target_files:
-            # Use specific target files
-            files = []
-            for target in target_files:
-                target_path = repo_path / target
-                if target_path.exists() and target_path.is_file():
-                    files.append(target_path)
-                else:
-                    logger.warning(f"Target file not found: {target_path}")
-            return files
-
+        """Find all code files in the repository recursively."""
         # Find all code files recursively
         code_files = []
 

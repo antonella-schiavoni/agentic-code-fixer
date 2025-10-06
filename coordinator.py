@@ -197,7 +197,6 @@ class AgenticCodeFixer:
             contexts = await self.code_indexer.index_repository(
                 repo_path=self.config.repository_path,
                 exclude_patterns=self.config.exclude_patterns,
-                target_files=self.config.target_files,
             )
 
             progress.update(task, advance=1)
@@ -244,7 +243,6 @@ class AgenticCodeFixer:
 
         patches = await self.agent_orchestrator.generate_patches(
             problem_description=self.config.problem_description,
-            target_files=self.config.target_files,  # TODO: Remove target_files
         )
 
         # Store patches in patch manager

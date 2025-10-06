@@ -153,9 +153,6 @@ class Config(BaseModel):
     # Repository settings
     repository_path: str = Field(description="Path to the target repository")
     problem_description: str = Field(description="Description of the bug/issue to fix")
-    target_files: list[str] | None = Field(
-        default=None, description="Specific files to focus on (optional)"
-    )
     exclude_patterns: list[str] = Field(
         default_factory=lambda: ["*.pyc", "__pycache__", ".git", "node_modules"]
     )

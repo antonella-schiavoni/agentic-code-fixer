@@ -17,7 +17,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from coordinator import run_from_config, run_from_config_with_overrides
+from coordinator import run_from_config_with_overrides
 from core import create_default_config, load_config
 from experiment_logging import ReportGenerator
 
@@ -54,24 +54,17 @@ def run(
         # Set the problem description from command line input
         config.problem_description = input
         
-        # Add context files if provided
+        # Add context files if provided (note: with target_files removed, context files are now indexed automatically through comprehensive repository scanning)
         if context:
-            # Validate context files exist
+            # Validate context files exist and log them for user awareness
             context_files = []
             for ctx_file in context:
                 ctx_path = Path(ctx_file)
                 if ctx_path.exists():
                     context_files.append(str(ctx_path.resolve()))
-                    console.print(f"[blue]Including context file: {ctx_file}[/blue]")
+                    console.print(f"[blue]Context file found: {ctx_file} (will be included via automatic repository indexing)[/blue]")
                 else:
                     console.print(f"[yellow]Warning: Context file not found: {ctx_file}[/yellow]")
-            
-            # Add context files to target_files for indexing
-            if context_files:
-                if config.target_files:
-                    config.target_files.extend(context_files)
-                else:
-                    config.target_files = context_files
 
         # Add additional exclude patterns if provided
         if exclude_patterns:

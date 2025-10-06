@@ -4,9 +4,7 @@
 # Repository settings
 repository_path: "/path/to/your/repository"
 problem_description: "Fix the bug in the authentication module where users cannot log in"
-target_files: #TODO: Does it make sense to include target_files here?
-  - "src/auth.py"
-  - "src/login.py"
+# target_files has been removed - the system now automatically discovers relevant files through vector search
 exclude_patterns: #TODO: Does it make sense to include exclude_patterns here?
   - "*.pyc"
   - "__pycache__"

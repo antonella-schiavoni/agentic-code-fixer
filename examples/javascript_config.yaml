@@ -4,10 +4,7 @@
 # Repository settings
 repository_path: "/path/to/javascript/project"
 problem_description: "Fix the memory leak in the Express.js application causing high memory usage"
-target_files:
-  - "src/server.js"
-  - "src/middleware/auth.js"
-  - "src/routes/api.js"
+# target_files has been removed - the system now automatically discovers relevant files through vector search
 exclude_patterns:
   - "node_modules"
   - "*.log"

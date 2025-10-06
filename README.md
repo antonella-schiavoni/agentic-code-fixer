@@ -112,9 +112,7 @@ Configuration files use YAML format with OpenCode SST integration. Here's a basi
 # Repository settings
 repository_path: "/path/to/your/repository"
 problem_description: "Fix the bug in the authentication module"
-target_files:
-  - "src/auth.py"
-  - "src/login.py"
+# target_files has been removed - the system now automatically discovers relevant files through vector search
 
 # OpenCode SST configuration
 opencode:

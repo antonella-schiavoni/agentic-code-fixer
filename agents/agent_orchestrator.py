@@ -90,7 +90,6 @@ class AgentOrchestrator:
     async def generate_patches(
         self,
         problem_description: str,
-        target_files: list[str] | None = None,
     ) -> list[PatchCandidate]:
         """Generate patch candidates using all agents with OpenCode session management.
 
@@ -116,9 +115,8 @@ class AgentOrchestrator:
                 logger.warning("No relevant code contexts found")
                 return []
 
-            # Determine target files
-            if not target_files:
-                target_files = list(set(ctx.file_path for ctx in relevant_contexts))
+            # Determine target files from relevant contexts
+            target_files = list(set(ctx.file_path for ctx in relevant_contexts))
 
             logger.info(f"Generating patches for {len(target_files)} files")
 
@@ -206,7 +204,6 @@ class AgentOrchestrator:
     async def generate_diverse_patches(
         self,
         problem_description: str,
-        target_files: list[str] | None = None,
         diversity_factor: float = 0.3,
     ) -> list[PatchCandidate]:
         """Generate diverse patch candidates by varying agent parameters.
@@ -218,7 +215,6 @@ class AgentOrchestrator:
         # Generate base patches
         base_patches = await self.generate_patches(
             problem_description=problem_description,
-            target_files=target_files,
         )
 
         # Create variations with different parameters
@@ -253,12 +249,9 @@ class AgentOrchestrator:
                         problem_description=problem_description, top_k=5
                     )
 
-                    if target_files:
-                        files_to_process = target_files
-                    else:
-                        files_to_process = list(
-                            set(ctx.file_path for ctx in relevant_contexts)
-                        )
+                    files_to_process = list(
+                        set(ctx.file_path for ctx in relevant_contexts)
+                    )
 
                     for target_file in files_to_process[
                         :2

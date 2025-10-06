@@ -4,10 +4,7 @@
 # Repository settings
 repository_path: "/path/to/complex/repository"
 problem_description: "Fix the race condition in the multi-threaded data processing pipeline that causes data corruption"
-target_files:
-  - "src/data/processor.py"
-  - "src/data/pipeline.py"
-  - "src/utils/threading.py"
+# target_files has been removed - the system now automatically discovers relevant files through vector search
 exclude_patterns:
   - "*.pyc"
   - "__pycache__"
