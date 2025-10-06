@@ -16,7 +16,6 @@ import logging
 import re
 
 from core.config import OpenCodeConfig
-from core.lsp_analyzer import LSPCodeAnalyzer, TargetType
 from core.role_manager import RoleManager
 from core.types import AgentConfig, CodeContext, PatchCandidate
 from opencode_client import OpenCodeClient
@@ -64,9 +63,6 @@ class OpenCodeAgent:
         )
         self.session_id: str | None = None
         self.role_manager = role_manager or RoleManager()
-        self.lsp_analyzer = (
-            LSPCodeAnalyzer(self.opencode_client) if self.opencode_client else None
-        )
 
         logger.info(f"Initialized OpenCode agent {agent_config.agent_id}")
 
@@ -99,10 +95,8 @@ class OpenCodeAgent:
             return []
 
         try:
-            # Prepare context for the agent with LSP enhancement
-            context_text = await self._format_contexts_with_lsp(
-                relevant_contexts, problem_description
-            )
+            # Prepare context for the agent
+            context_text = self._format_contexts(relevant_contexts)
 
             # Create specialized prompt based on agent role
             system_prompt = self._create_solution_system_prompt()
@@ -234,10 +228,8 @@ class OpenCodeAgent:
             return None
 
         try:
-            # Prepare context for the agent with LSP enhancement
-            context_text = await self._format_contexts_with_lsp(
-                relevant_contexts, problem_description
-            )
+            # Prepare context for the agent
+            context_text = self._format_contexts(relevant_contexts)
 
             # Create specialized prompt based on agent role
             system_prompt = self._create_system_prompt()
@@ -410,118 +402,6 @@ Dependencies: {", ".join(context.dependencies) if context.dependencies else "Non
             )
 
         return "\n\n".join(formatted_contexts)
-
-    async def _format_contexts_with_lsp(
-        self, contexts: list[CodeContext], problem_description: str
-    ) -> str:
-        """Format code contexts with LSP-enhanced semantic information.
-
-        This enhanced formatter uses LSP analysis to provide precise line ranges
-        and semantic information about code constructs, helping the agent make
-        more accurate targeting decisions.
-        """
-        if not contexts or not self.lsp_analyzer or not self.session_id:
-            return self._format_contexts(contexts)
-
-        formatted_contexts = []
-        for i, context in enumerate(contexts):
-            # Basic numbered content
-            lines = context.content.split("\n")
-            numbered_content = "\n".join(
-                f"{idx:2d}|{line}" for idx, line in enumerate(lines)
-            )
-
-            # Get LSP symbol analysis for this file
-            try:
-                symbols = await self.lsp_analyzer.analyze_file(
-                    self.session_id, context.file_path
-                )
-
-                # Find symbols relevant to the problem
-                relevant_symbols = (
-                    await self.lsp_analyzer.find_symbol_by_problem_description(
-                        self.session_id, context.file_path, problem_description
-                    )
-                )
-
-                # Create LSP-enhanced context
-                lsp_info = self._format_lsp_symbol_info(symbols, relevant_symbols)
-
-                formatted_contexts.append(
-                    f"""
-Context {i + 1} - {context.file_path} ({context.language}):
-```{context.language}
-{numbered_content}
-```
-
-Functions: {", ".join(context.relevant_functions) if context.relevant_functions else "None"}
-Dependencies: {", ".join(context.dependencies) if context.dependencies else "None"}
-
-LSP SEMANTIC ANALYSIS:
-{lsp_info}
-                """.strip()
-                )
-
-            except Exception as e:
-                logger.warning(
-                    f"Failed to get LSP analysis for {context.file_path}: {e}"
-                )
-                # Fallback to basic formatting
-                formatted_contexts.append(
-                    f"""
-Context {i + 1} - {context.file_path} ({context.language}):
-```{context.language}
-{numbered_content}
-```
-
-Functions: {", ".join(context.relevant_functions) if context.relevant_functions else "None"}
-Dependencies: {", ".join(context.dependencies) if context.dependencies else "None"}
-                """.strip()
-                )
-
-        return "\n\n".join(formatted_contexts)
-
-    def _format_lsp_symbol_info(
-        self, symbols: list, relevant_symbols: list[tuple]
-    ) -> str:
-        """Format LSP symbol information for inclusion in context."""
-        if not symbols:
-            return "No symbols found."
-
-        info_parts = []
-
-        # Add overview of all symbols
-        symbol_summary = []
-        for symbol in symbols:
-            symbol_summary.append(
-                f"  - {symbol.name} ({symbol.kind}): lines {symbol.range.start_line}-{symbol.range.end_line}"
-            )
-
-        info_parts.append("Symbols in this file:")
-        info_parts.extend(symbol_summary)
-
-        # Add detailed info for relevant symbols
-        if relevant_symbols:
-            info_parts.append("\nRELEVANT TO PROBLEM:")
-            for symbol, target_type in relevant_symbols[:3]:  # Top 3 most relevant
-                details = [f"Symbol: {symbol.name} ({symbol.kind})"]
-                details.append(
-                    f"Full range: lines {symbol.range.start_line}-{symbol.range.end_line}"
-                )
-
-                if target_type == TargetType.DOCSTRING and symbol.docstring_range:
-                    details.append(
-                        f"Docstring ONLY: lines {symbol.docstring_range.start_line}-{symbol.docstring_range.end_line}"
-                    )
-                elif target_type == TargetType.FUNCTION_BODY and symbol.body_range:
-                    details.append(
-                        f"Function body ONLY: lines {symbol.body_range.start_line}-{symbol.body_range.end_line}"
-                    )
-
-                details.append(f"Suggested target type: {target_type.value}")
-                info_parts.append("\n".join([f"  {detail}" for detail in details]))
-
-        return "\n".join(info_parts)
 
     def _parse_opencode_response(
         self,
@@ -699,23 +579,13 @@ Each patch in the array contains:
 - line_end: Ending line number (0-indexed) of the code section to replace
 - description: What this specific patch accomplishes
 
-CRITICAL INSTRUCTIONS FOR LSP-GUIDED PATCH TARGETING:
-1. The code context includes LSP SEMANTIC ANALYSIS with precise line ranges
-2. When LSP analysis shows "Docstring ONLY: lines X-Y", use EXACTLY those line numbers
-3. When LSP analysis shows "Function body ONLY: lines X-Y", use EXACTLY those line numbers
-4. NEVER include function definition lines when targeting docstrings
-5. NEVER include docstring lines when targeting function bodies
-6. The LSP analysis provides "Suggested target type" - follow this guidance
-7. Use the precise line numbers from LSP analysis, not manual counting
-
-IMPORTANT: If LSP analysis shows:
-- "Docstring ONLY: lines 8-9" → use line_start: 8, line_end: 9
-- "Function body ONLY: lines 11-15" → use line_start: 11, line_end: 15
-- "Suggested target type: docstring" → replace ONLY the docstring content
-
-Example LSP-guided docstring patch:
-LSP shows "Docstring ONLY: lines 8-9" →
-- line_start: 8, line_end: 9, content: "    \"\"\"Improved docstring text\"\"\"\n"
+CRITICAL INSTRUCTIONS FOR PRECISE PATCH TARGETING:
+1. Use the numbered line references in the code context to identify exact lines
+2. When targeting docstrings, replace ONLY the docstring lines, not the function definition
+3. When targeting function bodies, replace ONLY the function body lines, not the docstring
+4. Be very careful with line numbering - use the exact line numbers from the context
+5. For docstring changes, target only the lines containing the triple quotes and content
+6. For function body changes, start after the docstring ends
 
 The JSON schema is enforced, so ensure all required fields are provided.
 Think holistically about the problem and provide a complete, coordinated solution.
