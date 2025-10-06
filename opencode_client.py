@@ -128,8 +128,21 @@ class OpenCodeClient:
         if metadata:
             payload["metadata"] = metadata
 
-        response = await self.client.post("/session", json=payload)
-        response.raise_for_status()
+        try:
+            logger.debug(f"Creating session with payload: {payload}")
+            logger.debug(f"Sending POST to: {self.client.base_url}/session")
+            response = await self.client.post("/session", json=payload)
+            logger.debug(f"Session creation response status: {response.status_code}")
+            logger.debug(f"Session creation response text: {response.text}")
+            response.raise_for_status()
+        except Exception as e:
+            logger.error(f"Failed to create session. URL: {self.client.base_url}/session")
+            logger.error(f"Payload: {payload}")
+            logger.error(f"Error: {e}")
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response text: {e.response.text}")
+            raise
 
         session_data = response.json()
         session = OpenCodeSession(
@@ -337,10 +350,35 @@ class OpenCodeClient:
         Returns:
             LLM response containing the generated content and metadata.
         """
-        payload = {"prompt": prompt}
+        # Build parts array with proper format
+        parts = [{"type": "text", "text": prompt}]
+        
+        # Build payload with correct OpenCode API format
+        payload = {"parts": parts}
 
+        # Handle model parameter - convert string to OpenCode format
         if model:
-            payload["model"] = model
+            # Parse model name to extract provider and model ID
+            if "claude" in model.lower():
+                payload["model"] = {
+                    "providerID": "anthropic", 
+                    "modelID": model
+                }
+            elif "gpt" in model.lower() or "openai" in model.lower():
+                payload["model"] = {
+                    "providerID": "openai",
+                    "modelID": model
+                }
+            else:
+                # Default to anthropic for unknown models
+                payload["model"] = {
+                    "providerID": "anthropic",
+                    "modelID": model
+                }
+        
+        # Add other parameters if supported by OpenCode API
+        # Note: OpenCode may not support all these parameters directly
+        # We'll include them in case they are supported
         if temperature is not None:
             payload["temperature"] = temperature
         if max_tokens:
@@ -354,7 +392,7 @@ class OpenCodeClient:
         if json_schema:
             payload["json_schema"] = json_schema
 
-        response = await self.client.post(f"/session/{session_id}/prompt", json=payload)
+        response = await self.client.post(f"/session/{session_id}/message", json=payload)
         response.raise_for_status()
 
         result = response.json()
@@ -412,8 +450,11 @@ class OpenCodeClient:
             }
         )
 
-        # Change to repository directory
-        await self.execute_shell_command(session.session_id, f"cd {repository_path}")
+        # Change to repository directory (only if shell execution is enabled)
+        if self.config.enable_shell_execution:
+            await self.execute_shell_command(session.session_id, f"cd {repository_path}")
+        else:
+            logger.debug("Skipping shell command (shell execution disabled)")
 
         logger.info(
             f"Initialized session {session.session_id} for repository: {repository_path}"

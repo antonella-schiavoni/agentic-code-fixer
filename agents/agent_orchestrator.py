@@ -409,6 +409,10 @@ class AgentOrchestrator:
                 logger.error(
                     f"Failed to initialize session for agent {agent.agent_config.agent_id}: {e}"
                 )
+                logger.error(f"Exception type: {type(e).__name__}")
+                logger.error(f"Exception details: {str(e)}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
 
     async def _cleanup_agent_sessions(self) -> None:
         """Clean up all active OpenCode sessions."""

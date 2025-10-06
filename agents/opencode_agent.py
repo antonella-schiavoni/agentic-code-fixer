@@ -590,12 +590,8 @@ Respond with a JSON object containing your complete solution as specified in the
                 solution_data = response
                 logger.debug("Using direct structured JSON response for solution")
             else:
-                # Fallback to content extraction for backward compatibility
-                content = (
-                    response.get("content")
-                    or response.get("text")
-                    or response.get("response", "")
-                )
+                # Extract content from OpenCode response format
+                content = self._extract_content_from_opencode_response(response)
                 if not content:
                     logger.error("No content found in OpenCode solution response")
                     return []
@@ -678,6 +674,50 @@ Respond with a JSON object containing your complete solution as specified in the
             logger.error(f"Failed to parse OpenCode solution response: {e}")
             logger.debug(f"Raw response: {response}")
             return []
+
+    def _extract_content_from_opencode_response(self, response: dict[str, any]) -> str:
+        """Extract text content from OpenCode response format.
+        
+        OpenCode returns responses with this structure:
+        {
+            "info": {...},
+            "parts": [
+                {"type": "text", "text": "actual content here", ...},
+                ...
+            ]
+        }
+        """
+        try:
+            # Extract text from all text parts
+            if isinstance(response, dict) and "parts" in response:
+                text_content = []
+                for part in response["parts"]:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text = part.get("text", "")
+                        if text:
+                            text_content.append(text)
+                
+                combined_text = "\n".join(text_content).strip()
+                if combined_text:
+                    logger.debug(f"Extracted {len(combined_text)} characters from OpenCode parts")
+                    return combined_text
+            
+            # Fallback to old format
+            content = (
+                response.get("content")
+                or response.get("text")
+                or response.get("response", "")
+            )
+            if content:
+                logger.debug("Using fallback content extraction")
+                return content
+                
+            logger.warning("No text content found in OpenCode response")
+            return ""
+            
+        except Exception as e:
+            logger.error(f"Failed to extract content from OpenCode response: {e}")
+            return ""
 
     def get_agent_stats(self) -> dict[str, any]:
         """Get statistics about this agent's performance."""
