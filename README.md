@@ -28,14 +28,6 @@ The system consists of several key components integrated with **OpenCode SST**:
 8. **Reporting System**: Logs experiments and generates comprehensive reports
 9. **Coordinator**: Orchestrates the entire end-to-end workflow with session management
 
-### OpenCode SST Benefits
-
-- **Secure Authentication**: API keys managed through `opencode auth login`
-- **Provider Flexibility**: Easy switching between Claude, OpenAI, or OpenCode Zen
-- **Session Isolation**: Each agent operates in its own isolated session
-- **Resource Management**: Built-in session lifecycle and resource tracking
-- **Shell Integration**: Optional shell command execution through OpenCode sessions
-
 ## Installation
 
 ### Prerequisites
@@ -172,19 +164,6 @@ opencode:
   provider_name: "opencode"
 ```
 
-### Direct File Operations (Experimental)
-
-**⚠️ EXPERIMENTAL FEATURE - Use with caution in production environments**
-
-The system now supports **Direct File Operations**, allowing AI agents to write files directly instead of generating traditional patches. This provides faster iteration for simple changes while maintaining safety boundaries.
-
-#### Enabling Direct File Operations
-
-```yaml
-opencode:
-  enable_direct_file_ops: true  # Default: false
-```
-
 #### How It Works
 
 When enabled, agents can choose between two approaches:
@@ -201,15 +180,6 @@ When enabled, agents can choose between two approaches:
    - Precise control over specific changes
    - Existing evaluation and testing pipeline
 
-#### Safety Features
-
-- **Repository Confinement**: Operations limited to repository boundaries
-- **File Type Restrictions**: Only allowed extensions (.py, .yml, .yaml, .toml, .txt, etc.)
-- **Path Protection**: Cannot access .git, .env, secrets, or system directories
-- **Size Limits**: 1MB per file, 10MB total per session, max 100 files
-- **Audit Logging**: Complete operation history with diffs
-- **Code Quality Validation**: Automatic linting (ruff, pyright) for Python files
-
 #### Migration Guide
 
 ```bash
@@ -225,21 +195,6 @@ echo "  enable_direct_file_ops: false  # Start with disabled" >> config.yaml
 # 4. Monitor operation logs
 # Check ./experiments/{id}/patches/ for audit trails
 ```
-
-#### When to Use Direct Operations
-
-**✅ Good for:**
-- Simple bug fixes
-- Adding new small files
-- Configuration updates
-- Documentation changes
-- Single-file refactoring
-
-**❌ Avoid for:**
-- Complex multi-file refactoring
-- Large-scale architectural changes
-- Production-critical systems (until thoroughly tested)
-- Files containing secrets or sensitive data
 
 #### Rollback Plan
 
@@ -444,29 +399,6 @@ async with OpenCodeClient(opencode_config) as client:
     )
 ```
 
-## Why OpenCode SST Integration?
-
-### Security Benefits
-- **No API Keys in Code**: Credentials managed securely by OpenCode
-- **Centralized Authentication**: Single auth point for all LLM providers
-- **Session Isolation**: Each agent operates in its own secure environment
-
-### Scalability Benefits
-- **Resource Management**: OpenCode handles session lifecycle and cleanup
-- **Provider Abstraction**: Switch between Claude, OpenAI, and others seamlessly
-- **Concurrent Sessions**: Built-in support for parallel agent execution
-
-### Developer Experience
-- **Unified Interface**: Same API for all LLM providers
-- **Built-in Logging**: Comprehensive session and request logging
-- **Shell Integration**: Execute tests and commands within sessions
-- **Real-time Monitoring**: Track session status and resource usage
-
-### Production Ready
-- **Battle Tested**: OpenCode SST is used in production environments
-- **Error Handling**: Robust error recovery and retry mechanisms
-- **Performance Optimized**: Efficient connection pooling and request routing
-
 ## Troubleshooting
 
 ### Common Issues
@@ -525,29 +457,4 @@ opencode logs
 
 # Monitor sessions in real-time
 opencode sessions list --watch
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes following the coding guidelines
-4. Add tests for new functionality
-5. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Citation
-
-If you use Agentic Code Fixer in your research, please cite:
-
-```bibtex
-@software{agentic_code_fixer,
-  title={Agentic Code Fixer: Automated Patch Generation with AI Agents},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/your-org/agentic-code-fixer}
-}
 ```
