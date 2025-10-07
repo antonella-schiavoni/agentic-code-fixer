@@ -377,20 +377,42 @@ class AgenticCodeFixer:
         return winning_patch
 
     async def _apply_and_test_patch(self, patch) -> TestResult:
-        """Apply the winning patch and validate it through comprehensive testing.
+        """Apply the winning patch and its related solution patches, then validate through testing.
 
-        Creates an isolated test environment, applies the selected patch, and runs
-        the configured test suite to verify that the patch successfully fixes the
-        issue without introducing regressions.
+        Creates an isolated test environment, applies all patches from the winning solution,
+        and runs the configured test suite to verify that the solution successfully fixes
+        the issue without introducing regressions.
 
         Args:
-            patch: PatchCandidate to apply and test.
+            patch: Winning PatchCandidate to apply and test (may be part of multi-patch solution).
 
         Returns:
-            TestResult containing test outcomes, timing, and detailed failure
-            information if applicable.
+            TestResult containing test outcomes, timing, and detailed failure information.
         """
         self.experiment_logger.log_test_start(patch.id)
+
+        # Find all patches that are part of the same solution as the winning patch
+        session_id = patch.metadata.get("opencode_session", "unknown")
+        agent_id = patch.agent_id
+        solution_key = f"{agent_id}_{session_id}"
+        
+        # Get all patches from the patch manager that belong to the same solution
+        all_patches = self.patch_manager.get_all_patches()
+        solution_patches = [
+            p for p in all_patches 
+            if (p.agent_id == agent_id and 
+                p.metadata.get("opencode_session") == session_id)
+        ]
+        
+        # Sort patches by their index in the solution
+        solution_patches.sort(key=lambda p: p.metadata.get("solution_patch_index", 0))
+        
+        logger.info(
+            f"Applying complete solution with {len(solution_patches)} patches for winning patch {patch.id}"
+        )
+        self.experiment_logger.log_info(
+            f"Testing complete solution {solution_key} with {len(solution_patches)} patches"
+        )
 
         # Create a test environment
         test_env = self.patch_applicator.create_test_environment(
@@ -401,25 +423,58 @@ class AgenticCodeFixer:
         )
 
         try:
-            # Apply patch and run tests
-            apply_success, test_result = self.patch_applicator.apply_and_test_patch(
-                patch=patch,
-                repo_path=test_env,
+            # Apply all patches in the solution
+            applied_patches = []
+            all_applied = True
+            
+            for solution_patch in solution_patches:
+                apply_success = self.patch_applicator.apply_patch(
+                    patch=solution_patch,
+                    repo_path=test_env,
+                    create_backup=True,
+                )
+                
+                if apply_success:
+                    applied_patches.append(solution_patch)
+                    self.patch_manager.update_patch_status(solution_patch.id, PatchStatus.APPLIED)
+                else:
+                    logger.error(f"Failed to apply patch {solution_patch.id} in winning solution")
+                    all_applied = False
+                    break
+
+            if not all_applied:
+                # Mark all patches in the solution as failed
+                for solution_patch in solution_patches:
+                    self.patch_manager.update_patch_status(solution_patch.id, PatchStatus.FAILED)
+                
+                # Return a failed test result
+                test_result = TestResult(
+                    passed=False,
+                    exit_code=1,
+                    output="Failed to apply complete solution",
+                    duration_seconds=0.0,
+                    timestamp=datetime.now()
+                )
+                self.experiment_logger.log_test_result(test_result, patch.id)
+                return test_result
+
+            # Run tests on the complete solution
+            test_result = self.patch_applicator.run_tests(
+                repo_path=test_env, patch_id=f"solution_{solution_key}"
             )
 
-            if apply_success:
-                self.patch_manager.update_patch_status(patch.id, PatchStatus.APPLIED)
+            # Update status for all patches based on test results
+            for solution_patch in solution_patches:
                 if test_result.passed:
-                    self.patch_manager.update_patch_status(patch.id, PatchStatus.TESTED)
+                    self.patch_manager.update_patch_status(solution_patch.id, PatchStatus.TESTED)
                 else:
-                    self.patch_manager.update_patch_status(patch.id, PatchStatus.FAILED)
-            else:
-                self.patch_manager.update_patch_status(patch.id, PatchStatus.FAILED)
+                    self.patch_manager.update_patch_status(solution_patch.id, PatchStatus.FAILED)
 
             self.experiment_logger.log_test_result(test_result, patch.id)
 
             logger.info(
-                f"Patch testing completed: {'PASSED' if test_result.passed else 'FAILED'}"
+                f"Solution testing completed: {'PASSED' if test_result.passed else 'FAILED'} "
+                f"({len(solution_patches)} patches)"
             )
             return test_result
 
@@ -428,28 +483,42 @@ class AgenticCodeFixer:
             self.patch_applicator.cleanup_test_environment(test_env)
 
     async def _validate_patches_before_evaluation(self, patches: list) -> list:
-        """Validate patches efficiently using a shared test environment.
+        """Validate patches efficiently using solution-based validation.
 
-        Uses a single test environment and applies/reverts patches sequentially
-        to minimize resource usage while still filtering out broken patches before
-        expensive LLM evaluation.
+        Groups patches by their solution and validates complete solutions together,
+        since multi-patch solutions need all patches applied to pass tests.
 
         Args:
             patches: List of PatchCandidate objects to validate.
 
         Returns:
-            List of patches that pass both compilation and test validation.
+            List of patches that are part of solutions that pass validation.
         """
         if not patches:
             return []
 
-        valid_patches = []
+        # Group patches by their solution using session ID and agent ID as solution identifier
+        solution_groups = {}
+        for patch in patches:
+            # Use combination of opencode_session and agent_id to identify solutions
+            session_id = patch.metadata.get("opencode_session", "unknown")
+            agent_id = patch.agent_id
+            solution_key = f"{agent_id}_{session_id}"
+            
+            if solution_key not in solution_groups:
+                solution_groups[solution_key] = []
+            solution_groups[solution_key].append(patch)
 
-        # Sort patches by confidence score (highest first) for better efficiency
-        sorted_patches = sorted(patches, key=lambda p: p.confidence_score, reverse=True)
+        # Sort solution groups by the highest confidence patch in each group
+        sorted_solution_groups = sorted(
+            solution_groups.items(),
+            key=lambda item: max(p.confidence_score for p in item[1]),
+            reverse=True
+        )
 
         self.experiment_logger.log_info(
-            f"Starting efficient pre-evaluation validation of {len(patches)} patches (ordered by confidence)..."
+            f"Starting solution-based pre-evaluation validation of {len(sorted_solution_groups)} solutions "
+            f"containing {len(patches)} total patches..."
         )
 
         # Create a single shared test environment for all validation
@@ -460,95 +529,102 @@ class AgenticCodeFixer:
             / "shared_validation_env",
         )
 
+        valid_patches = []
+
         try:
-            for patch in sorted_patches:
+            for solution_key, solution_patches in sorted_solution_groups:
+                # Sort patches within solution by patch index if available
+                solution_patches.sort(key=lambda p: p.metadata.get("solution_patch_index", 0))
+                
                 self.experiment_logger.log_info(
-                    f"Validating patch {patch.id} in shared environment..."
+                    f"Validating solution {solution_key} with {len(solution_patches)} patches..."
                 )
 
                 try:
-                    # Apply the patch
-                    apply_success = self.patch_applicator.apply_patch(
-                        patch=patch,
-                        repo_path=shared_test_env,
-                        create_backup=True,  # Always create backup for revert
-                    )
+                    # Apply all patches in the solution
+                    applied_patches = []
+                    all_applied = True
+                    
+                    for patch in solution_patches:
+                        apply_success = self.patch_applicator.apply_patch(
+                            patch=patch,
+                            repo_path=shared_test_env,
+                            create_backup=True,
+                        )
+                        
+                        if apply_success:
+                            applied_patches.append(patch)
+                        else:
+                            self.experiment_logger.log_info(
+                                f"❌ Patch {patch.id} in solution {solution_key} failed to apply"
+                            )
+                            all_applied = False
+                            break
 
-                    if not apply_success:
-                        self.experiment_logger.log_info(
-                            f"❌ Patch {patch.id} failed to apply"
-                        )
-                        logger.info(
-                            f"Patch {patch.id} failed validation: could not apply"
-                        )
+                    if not all_applied:
+                        # Revert any patches that were applied
+                        for applied_patch in reversed(applied_patches):
+                            try:
+                                self.patch_applicator.revert_patch(applied_patch, shared_test_env)
+                            except Exception as e:
+                                logger.error(f"Failed to revert patch {applied_patch.id}: {e}")
                         continue
 
-                    # Run tests with shorter timeout for validation (fail fast)
-                    # Use a shorter timeout than the main test runs for efficiency
+                    # Run tests on the complete solution
                     validation_timeout = min(
-                        self.patch_applicator.config.test_timeout_seconds
-                        // 2,  # Half the normal timeout
-                        30,  # Max 30 seconds for validation
+                        self.patch_applicator.config.test_timeout_seconds // 2,
+                        30,
                     )
 
-                    # Temporarily override timeout for validation
                     original_timeout = self.patch_applicator.config.test_timeout_seconds
-                    self.patch_applicator.config.test_timeout_seconds = (
-                        validation_timeout
-                    )
+                    self.patch_applicator.config.test_timeout_seconds = validation_timeout
 
                     try:
                         test_result = self.patch_applicator.run_tests(
-                            repo_path=shared_test_env, patch_id=patch.id
+                            repo_path=shared_test_env, patch_id=f"solution_{solution_key}"
                         )
                     finally:
-                        # Restore original timeout
-                        self.patch_applicator.config.test_timeout_seconds = (
-                            original_timeout
-                        )
+                        self.patch_applicator.config.test_timeout_seconds = original_timeout
 
                     if test_result.passed:
-                        valid_patches.append(patch)
+                        # All patches in this solution are valid
+                        valid_patches.extend(solution_patches)
                         self.experiment_logger.log_info(
-                            f"✅ Patch {patch.id} passed validation (tests: {test_result.exit_code})"
+                            f"✅ Solution {solution_key} with {len(solution_patches)} patches passed validation"
                         )
                         logger.info(
-                            f"Patch {patch.id} passed validation: compilation and tests OK"
+                            f"Solution {solution_key} passed validation: all {len(solution_patches)} patches are valid"
                         )
                     else:
                         self.experiment_logger.log_info(
-                            f"❌ Patch {patch.id} failed tests (exit code: {test_result.exit_code})"
+                            f"❌ Solution {solution_key} failed tests (exit code: {test_result.exit_code})"
                         )
                         logger.info(
-                            f"Patch {patch.id} failed validation: tests failed (exit code: {test_result.exit_code})"
+                            f"Solution {solution_key} failed validation: tests failed (exit code: {test_result.exit_code})"
                         )
 
-                    # Always revert the patch to clean state for next validation
-                    revert_success = self.patch_applicator.revert_patch(
-                        patch=patch, repo_path=shared_test_env
-                    )
-
-                    if not revert_success:
-                        logger.warning(
-                            f"Failed to revert patch {patch.id}, validation environment may be corrupted"
-                        )
-                        # Continue anyway, but log the issue
+                    # Revert all patches in this solution
+                    for applied_patch in reversed(applied_patches):
+                        try:
+                            revert_success = self.patch_applicator.revert_patch(
+                                applied_patch, shared_test_env
+                            )
+                            if not revert_success:
+                                logger.warning(
+                                    f"Failed to revert patch {applied_patch.id}, validation environment may be corrupted"
+                                )
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to revert patch {applied_patch.id}: {e}"
+                            )
 
                 except Exception as e:
                     self.experiment_logger.log_error(
-                        f"❌ Patch {patch.id} validation error: {e}"
+                        f"❌ Solution {solution_key} validation error: {e}"
                     )
                     logger.error(
-                        f"Patch {patch.id} validation failed with exception: {e}"
+                        f"Solution {solution_key} validation failed with exception: {e}"
                     )
-
-                    # Attempt to revert even on error
-                    try:
-                        self.patch_applicator.revert_patch(patch, shared_test_env)
-                    except Exception as revert_error:
-                        logger.error(
-                            f"Failed to revert patch {patch.id} after error: {revert_error}"
-                        )
 
         finally:
             # Clean up the shared test environment
@@ -560,59 +636,86 @@ class AgenticCodeFixer:
         return valid_patches
     
     async def _apply_patch_to_original_repository(self, patch) -> bool:
-        """Apply the winning patch to the original repository after successful testing.
+        """Apply the complete winning solution to the original repository after successful testing.
         
-        This method applies the tested and validated patch to the original repository,
+        This method applies all patches from the winning solution to the original repository,
         making the fix permanent. It includes safety checks and detailed logging to
-        ensure the patch is applied correctly.
+        ensure all patches are applied correctly in sequence.
         
         Args:
-            patch: PatchCandidate that passed testing and should be applied permanently.
+            patch: Winning PatchCandidate (may be part of multi-patch solution).
             
         Returns:
-            True if the patch was successfully applied to the original repository,
+            True if the complete solution was successfully applied to the original repository,
             False if the application failed.
         """
+        # Find all patches that are part of the same solution as the winning patch
+        session_id = patch.metadata.get("opencode_session", "unknown")
+        agent_id = patch.agent_id
+        solution_key = f"{agent_id}_{session_id}"
+        
+        # Get all patches from the patch manager that belong to the same solution
+        all_patches = self.patch_manager.get_all_patches()
+        solution_patches = [
+            p for p in all_patches 
+            if (p.agent_id == agent_id and 
+                p.metadata.get("opencode_session") == session_id)
+        ]
+        
+        # Sort patches by their index in the solution
+        solution_patches.sort(key=lambda p: p.metadata.get("solution_patch_index", 0))
+        
         self.experiment_logger.log_info(
-            f"Applying winning patch {patch.id} to original repository..."
+            f"Applying complete winning solution {solution_key} with {len(solution_patches)} patches to original repository..."
         )
         logger.info(
-            f"Applying winning patch {patch.id} to original repository at {self.config.repository_path}"
+            f"Applying winning solution {solution_key} with {len(solution_patches)} patches to original repository at {self.config.repository_path}"
         )
         
         try:
-            # Apply the patch to the original repository
-            success = self.patch_applicator.apply_patch(
-                patch=patch,
-                repo_path=self.config.repository_path,
-                create_backup=True  # Always create backup when modifying original repo
-            )
+            # Apply all patches in the solution to the original repository
+            applied_patches = []
+            all_applied = True
             
-            if success:
+            for solution_patch in solution_patches:
+                success = self.patch_applicator.apply_patch(
+                    patch=solution_patch,
+                    repo_path=self.config.repository_path,
+                    create_backup=True  # Always create backup when modifying original repo
+                )
+                
+                if success:
+                    applied_patches.append(solution_patch)
+                    self.patch_manager.update_patch_status(solution_patch.id, PatchStatus.APPLIED)
+                    logger.info(f"✅ Applied patch {solution_patch.id} to original repository")
+                else:
+                    logger.error(f"❌ Failed to apply patch {solution_patch.id} to original repository")
+                    all_applied = False
+                    break
+            
+            if all_applied:
                 self.experiment_logger.log_info(
-                    f"✅ Successfully applied winning patch {patch.id} to original repository"
+                    f"✅ Successfully applied complete winning solution {solution_key} ({len(solution_patches)} patches) to original repository"
                 )
                 logger.info(
-                    f"✅ Winning patch {patch.id} successfully applied to original repository"
+                    f"✅ Complete winning solution {solution_key} with {len(solution_patches)} patches successfully applied to original repository"
                 )
-                # Update patch status to indicate it's been applied to the original repo
-                self.patch_manager.update_patch_status(patch.id, PatchStatus.APPLIED)
                 return True
             else:
                 self.experiment_logger.log_error(
-                    f"❌ Failed to apply winning patch {patch.id} to original repository"
+                    f"❌ Failed to apply complete winning solution {solution_key} to original repository (applied {len(applied_patches)}/{len(solution_patches)} patches)"
                 )
                 logger.error(
-                    f"❌ Failed to apply winning patch {patch.id} to original repository"
+                    f"❌ Failed to apply complete winning solution {solution_key} to original repository"
                 )
                 return False
                 
         except Exception as e:
             self.experiment_logger.log_error(
-                f"❌ Exception while applying patch {patch.id} to original repository: {e}"
+                f"❌ Exception while applying winning solution {solution_key} to original repository: {e}"
             )
             logger.error(
-                f"❌ Exception while applying patch {patch.id} to original repository: {e}"
+                f"❌ Exception while applying winning solution {solution_key} to original repository: {e}"
             )
             return False
 
