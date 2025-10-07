@@ -116,6 +116,8 @@ class EvaluationConfig(BaseModel):
         min_comparisons_per_patch: Minimum comparisons needed per patch.
         confidence_threshold: Minimum confidence required for evaluation results.
     """
+    
+    model_config = {"protected_namespaces": ()}
 
     method: EvaluationMethod = EvaluationMethod.ELO_TOURNAMENT
     model_name: str

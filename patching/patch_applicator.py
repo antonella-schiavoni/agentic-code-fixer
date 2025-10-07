@@ -132,16 +132,13 @@ class PatchApplicator:
             line_end_0idx = patch.line_end
             
             # Validate line range (fail fast as per rules)
-            # Support appending new lines: line_end can be beyond current file length
-            max_valid_line_end = len(lines)  # Allow appending at the end
-            
-            if (line_start_0idx < 0 or 
-                line_start_0idx > max_valid_line_end or 
-                line_end_0idx < line_start_0idx):
+            # Support appending new lines: both line_start and line_end can be beyond current file length
+            # Only validate that line numbers are non-negative and line_end >= line_start
+            if (line_start_0idx < 0 or line_end_0idx < line_start_0idx):
                 logger.error(
                     f"Invalid patch line range: lines {patch.line_start}-{patch.line_end} "
-                    f"for file with {len(lines)} lines. Valid start range: 0-{max_valid_line_end}, "
-                    f"line_end must be >= line_start"
+                    f"for file with {len(lines)} lines. Line numbers must be non-negative "
+                    f"and line_end must be >= line_start"
                 )
                 return False
 
@@ -175,13 +172,27 @@ class PatchApplicator:
             with open(target_file, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
             
+            # DEBUG: Log what we actually wrote
+            logger.debug(f"DEBUG: Wrote {len(new_lines)} lines to file:")
+            for i, line in enumerate(new_lines[:10]):  # Show first 10 lines
+                logger.debug(f"  {i}: {repr(line)}")
+            
             # Validate patch was applied correctly by reading back the file
             with open(target_file, encoding="utf-8") as f:
                 verification_lines = f.readlines()
             
+            # DEBUG: Log what we read back
+            logger.debug(f"DEBUG: Read back {len(verification_lines)} lines from file:")
+            for i, line in enumerate(verification_lines[:10]):  # Show first 10 lines
+                logger.debug(f"  {i}: {repr(line)}")
+            
             # Check that the patched lines match expected content
             actual_patched_lines = verification_lines[line_start_0idx:line_start_0idx + len(patch_lines)]
             expected_lines = patch_lines
+            
+            # DEBUG: Log the slice extraction
+            logger.debug(f"DEBUG: Extracting slice [{line_start_0idx}:{line_start_0idx + len(patch_lines)}]")
+            logger.debug(f"DEBUG: Expected {len(expected_lines)} lines, got {len(actual_patched_lines)} lines")
             
             if actual_patched_lines == expected_lines:
                 logger.info(

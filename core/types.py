@@ -287,6 +287,8 @@ class AgentConfig(BaseModel):
         specialized_role: Optional role specialization (e.g., 'security',
             'performance', 'general') that influences prompting strategy.
     """
+    
+    model_config = {"protected_namespaces": ()}
 
     agent_id: str
     model_name: str

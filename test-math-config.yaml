@@ -1,0 +1,73 @@
+agents:
+- agent_id: general_fixer
+  max_tokens: 2048
+  model_name: claude-sonnet-4-5-20250929
+  specialized_role: general
+  system_prompt: You are a skilled software engineer focused on fixing bugs.
+  temperature: 0.7
+- agent_id: security_expert
+  max_tokens: 2048
+  model_name: claude-sonnet-4-5-20250929
+  specialized_role: security
+  system_prompt: You are a security expert focused on secure code fixes.
+  temperature: 0.5
+- agent_id: performance_optimizer
+  max_tokens: 2048
+  model_name: claude-sonnet-4-5-20250929
+  specialized_role: performance
+  system_prompt: You are a performance expert focused on efficient solutions.
+  temperature: 0.6
+apply_patch_to_repository: true
+evaluation:
+  confidence_threshold: 0.7
+  elo_k_factor: 32
+  max_tokens: 2048
+  method: elo_tournament
+  min_comparisons_per_patch: 3
+  model_name: claude-sonnet-4-5-20250929
+  temperature: 0.1
+exclude_patterns:
+- '*.pyc'
+- __pycache__
+- .git
+- node_modules
+logging:
+  console_output: true
+  level: DEBUG
+  log_file: agentic_code_fixer.log
+  output_dir: ./experiments
+  save_evaluations: true
+  save_patches: true
+  save_test_results: true
+num_candidate_solutions: 3
+opencode:
+  base_url: null
+  enable_code_analysis: true
+  enable_direct_file_ops: false
+  enable_event_streaming: true
+  enable_shell_execution: true
+  enabled: true
+  max_parallel_sessions: 4
+  provider_name: anthropic
+  server_host: 127.0.0.1
+  server_port: 4096
+  session_timeout_seconds: 600
+  use_provider_auth: true
+  use_sessions: true
+problem_description: 'Fix the bugs in the math operations: add function should add
+  not multiply, and divide function should divide by b not by 0'
+repository_path: /Users/antonellaschiavoni/antonella-projects/math-operations-repo
+testing:
+  fail_on_regression: true
+  post_test_commands: []
+  pre_test_commands: []
+  required_coverage: null
+  test_command: pytest
+  test_timeout_seconds: 300
+vectordb:
+  chunk_overlap: 50
+  chunk_size: 500
+  collection_name: code_embeddings
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  persist_directory: ./data/vectordb
+  provider: chromadb
