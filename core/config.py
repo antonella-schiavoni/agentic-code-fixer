@@ -72,6 +72,7 @@ class OpenCodeConfig(BaseModel):
         enable_shell_execution: Whether to use OpenCode's shell execution for tests.
         enable_code_analysis: Whether to use OpenCode's built-in code analysis.
         enable_event_streaming: Whether to enable OpenCode's real-time event streaming.
+        enable_direct_file_ops: Whether to enable AI agents to write files directly.
         provider_name: LLM provider to use ("anthropic", "openai", "opencode").
         use_provider_auth: Whether to use OpenCode's provider authentication system.
     """
@@ -86,6 +87,7 @@ class OpenCodeConfig(BaseModel):
     enable_shell_execution: bool = True
     enable_code_analysis: bool = True
     enable_event_streaming: bool = True
+    enable_direct_file_ops: bool = False  # Enable direct file operations via agents
     provider_name: str = "anthropic"
     use_provider_auth: bool = True
 
@@ -155,6 +157,10 @@ class Config(BaseModel):
     problem_description: str = Field(description="Description of the bug/issue to fix")
     exclude_patterns: list[str] = Field(
         default_factory=lambda: ["*.pyc", "__pycache__", ".git", "node_modules"]
+    )
+    apply_patch_to_repository: bool = Field(
+        default=True, 
+        description="Whether to apply successful patches to the original repository"
     )
 
     # Agent configuration

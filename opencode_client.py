@@ -345,6 +345,148 @@ class OpenCodeClient:
             logger.error(f"Failed to read file {file_path}: {e}")
             return None
 
+    async def write_file(
+        self, session_id: str, file_path: str, content: str
+    ) -> bool:
+        """Write content to a file in the session.
+
+        Args:
+            session_id: ID of the session to write the file in.
+            file_path: Path to the file to write.
+            content: Content to write to the file.
+
+        Returns:
+            True if the file was written successfully, False otherwise.
+        """
+        try:
+            # Try direct API endpoint first
+            payload = {"content": content}
+            response = await self.client.put(
+                f"/session/{session_id}/files/{file_path}", json=payload
+            )
+            
+            # If direct endpoint doesn't exist, fall back to shell command
+            if response.status_code == 404:
+                logger.debug(
+                    f"Direct write endpoint not found, using shell command for {file_path}"
+                )
+                return await self._write_file_via_shell(session_id, file_path, content)
+            
+            response.raise_for_status()
+            logger.debug(f"Wrote {len(content)} characters to {file_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to write file {file_path}: {e}")
+            # Fall back to shell command if direct API fails
+            logger.debug(f"Falling back to shell command for {file_path}")
+            return await self._write_file_via_shell(session_id, file_path, content)
+
+    async def _write_file_via_shell(
+        self, session_id: str, file_path: str, content: str
+    ) -> bool:
+        """Write file using shell commands as fallback.
+        
+        Args:
+            session_id: ID of the session to write the file in.
+            file_path: Path to the file to write.
+            content: Content to write to the file.
+            
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            # Create directory if it doesn't exist
+            from pathlib import Path
+            dir_path = str(Path(file_path).parent)
+            if dir_path != ".":
+                mkdir_result = await self.execute_shell_command(
+                    session_id, f"mkdir -p '{dir_path}'"
+                )
+                if mkdir_result.exit_code != 0:
+                    logger.error(f"Failed to create directory {dir_path}")
+                    return False
+            
+            # Use a here-document to safely write content with proper escaping
+            escaped_content = content.replace("'", "'\"'\"'")
+            write_command = f"cat > '{file_path}' << 'EOF'\n{escaped_content}\nEOF"
+            
+            result = await self.execute_shell_command(session_id, write_command)
+            
+            if result.exit_code == 0:
+                logger.debug(f"Successfully wrote {len(content)} characters to {file_path}")
+                return True
+            else:
+                logger.error(
+                    f"Shell write failed for {file_path}: {result.stderr}"
+                )
+                return False
+                
+        except Exception as e:
+            logger.error(f"Shell write failed for {file_path}: {e}")
+            return False
+
+    async def delete_file(self, session_id: str, file_path: str) -> bool:
+        """Delete a file in the session.
+
+        Args:
+            session_id: ID of the session containing the file.
+            file_path: Path to the file to delete.
+
+        Returns:
+            True if the file was deleted successfully, False otherwise.
+        """
+        try:
+            # Try direct API endpoint first
+            response = await self.client.delete(
+                f"/session/{session_id}/files/{file_path}"
+            )
+            
+            # If direct endpoint doesn't exist, fall back to shell command
+            if response.status_code == 404:
+                logger.debug(
+                    f"Direct delete endpoint not found, using shell command for {file_path}"
+                )
+                return await self._delete_file_via_shell(session_id, file_path)
+            
+            response.raise_for_status()
+            logger.debug(f"Deleted file {file_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to delete file {file_path}: {e}")
+            # Fall back to shell command if direct API fails
+            logger.debug(f"Falling back to shell command for {file_path}")
+            return await self._delete_file_via_shell(session_id, file_path)
+
+    async def _delete_file_via_shell(
+        self, session_id: str, file_path: str
+    ) -> bool:
+        """Delete file using shell commands as fallback.
+        
+        Args:
+            session_id: ID of the session to delete the file in.
+            file_path: Path to the file to delete.
+            
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            result = await self.execute_shell_command(
+                session_id, f"rm -f '{file_path}'"
+            )
+            
+            if result.exit_code == 0:
+                logger.debug(f"Successfully deleted file {file_path}")
+                return True
+            else:
+                logger.error(f"Shell delete failed for {file_path}: {result.stderr}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Shell delete failed for {file_path}: {e}")
+            return False
+
     async def send_prompt(
         self,
         session_id: str,

@@ -19,6 +19,14 @@ from core.config import OpenCodeConfig
 from core.role_manager import RoleManager
 from core.types import AgentConfig, CodeContext, PatchCandidate
 from opencode_client import OpenCodeClient
+from operations import (
+    FileOperationsService,
+    OpenCodeBackend,
+    LocalBackend,
+    FileOperationsConfig,
+    FileOperationError,
+    SecurityViolationError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +47,7 @@ class OpenCodeAgent:
         opencode_config: OpenCode SST framework configuration.
         opencode_client: OpenCode client for session and LLM communication.
         session_id: Active OpenCode session ID for this agent.
+        file_ops_service: Optional file operations service for direct file I/O.
     """
 
     def __init__(
@@ -63,6 +72,7 @@ class OpenCodeAgent:
         )
         self.session_id: str | None = None
         self.role_manager = role_manager or RoleManager()
+        self.file_ops_service: FileOperationsService | None = None
 
         logger.info(f"Initialized OpenCode agent {agent_config.agent_id}")
 
@@ -177,7 +187,7 @@ class OpenCodeAgent:
             )
 
             # Parse response to extract solution patches
-            patches = self._parse_solution_response(response)
+            patches = await self._parse_solution_response(response)
 
             if patches:
                 logger.info(
@@ -309,7 +319,7 @@ class OpenCodeAgent:
             )
 
             # Parse response to extract solution patches
-            patches = self._parse_solution_response(response)
+            patches = await self._parse_solution_response(response)
             # For backward compatibility, return the first patch targeting the specified file
             if patches:
                 target_patch = next(
@@ -341,6 +351,54 @@ class OpenCodeAgent:
         logger.debug(
             f"Agent {self.agent_config.agent_id} assigned to session {session_id}"
         )
+
+    def initialize_file_operations(
+        self, repo_path: str, enable_direct_ops: bool = False
+    ) -> None:
+        """Initialize file operations service for direct file I/O.
+
+        Args:
+            repo_path: Path to the repository root directory.
+            enable_direct_ops: Whether to enable direct file operations.
+        """
+        if not enable_direct_ops or not self.opencode_config.enable_direct_file_ops:
+            logger.debug(
+                f"Agent {self.agent_config.agent_id}: Direct file ops disabled"
+            )
+            return
+
+        try:
+            # Choose backend based on OpenCode availability
+            if self.opencode_client and self.session_id:
+                backend = OpenCodeBackend(self.opencode_client, self.session_id)
+                logger.info(
+                    f"Agent {self.agent_config.agent_id}: Using OpenCode file backend"
+                )
+            else:
+                from pathlib import Path
+
+                backend = LocalBackend(Path(repo_path))
+                logger.info(
+                    f"Agent {self.agent_config.agent_id}: Using local file backend"
+                )
+
+            # Initialize file operations service with safety constraints
+            self.file_ops_service = FileOperationsService(
+                repo_root=repo_path,
+                backend=backend,
+                config=FileOperationsConfig(),
+            )
+
+            logger.info(
+                f"Agent {self.agent_config.agent_id}: File operations service initialized"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Agent {self.agent_config.agent_id}: "
+                f"Failed to initialize file operations: {e}"
+            )
+            self.file_ops_service = None
 
     def _create_system_prompt(self) -> str:
         """Create system prompt based on agent configuration."""
@@ -567,28 +625,38 @@ Analyze the problem carefully and provide a comprehensive solution that:
 4. Handles edge cases appropriately
 5. Follows best practices for the programming language
 
-You will respond with a structured JSON object containing:
-- solution_description: Overall description of your solution approach
-- patches: Array of individual file patches that together form the complete solution
-- confidence_score: Your confidence in this solution (0.0-1.0)
+Respond with a JSON object in this format:
+{{
+  "solution_description": "Overall description of your solution approach",
+  "patches": [
+    {{
+      "file_path": "The file to modify",
+      "content": "The exact replacement code for the specific lines",
+      "line_start": 0,
+      "line_end": 10,
+      "description": "What this specific patch accomplishes"
+    }}
+  ],
+  "confidence_score": 0.85
+}}
 
-Each patch in the array contains:
-- file_path: The file to modify
-- content: The exact replacement code for the specific lines being changed
-- line_start: Starting line number (0-indexed) of the code section to replace
-- line_end: Ending line number (0-indexed) of the code section to replace
-- description: What this specific patch accomplishes
+CRITICAL DOCSTRING TARGETING RULES:
+- When improving docstrings: Replace ONLY the existing docstring lines (triple quotes), NOT the function definition or body
+- Use the numbered line references to identify the EXACT docstring lines to replace
+- NEVER include 'def function_name():' in your replacement content
+- NEVER include 'return' statements or function body code in docstring patches
+- If a function has a simple docstring, replace ONLY that line
+- Your replacement content should start and end with triple quotes
+- Preserve the original indentation level of the docstring
 
-CRITICAL INSTRUCTIONS FOR PRECISE PATCH TARGETING:
-1. Use the numbered line references in the code context to identify exact lines
-2. When targeting docstrings, replace ONLY the docstring lines, not the function definition
-3. When targeting function bodies, replace ONLY the function body lines, not the docstring
-4. Be very careful with line numbering - use the exact line numbers from the context
-5. For docstring changes, target only the lines containing the triple quotes and content
-6. For function body changes, start after the docstring ends
+Example: If you see:
+  7|def add(a, b):
+  8|    '''Add two numbers.'''
+  9|    return a + b
+
+To replace the docstring, target line_start: 8, line_end: 8, content with proper docstring only
 
 The JSON schema is enforced, so ensure all required fields are provided.
-Think holistically about the problem and provide a complete, coordinated solution.
         """.strip()
 
     def _create_solution_user_prompt(
@@ -622,29 +690,53 @@ improvements, replace only the docstring lines, not the entire function.
 Respond with a JSON object containing your complete solution as specified in the system prompt.
         """.strip()
 
-    def _parse_solution_response(
+    async def _parse_solution_response(
         self,
         response: dict[str, any],
     ) -> list[PatchCandidate]:
         """Parse OpenCode's structured JSON response to extract solution patches."""
         try:
+            # Extract content from OpenCode response
+            solution_data = self._extract_and_parse_solution_content(response)
+            if not solution_data:
+                return []
+
+            # Check if this is a direct operations response
+            if solution_data.get("approach") == "direct_operations":
+                return await self._handle_direct_operations(solution_data)
+            
+            # Handle traditional patch-based response
+            return self._handle_patch_based_response(solution_data)
+            
+        except Exception as e:
+            logger.error(f"Failed to parse OpenCode solution response: {e}")
+            logger.debug(f"Raw response: {response}")
+            return []
+
+    def _extract_and_parse_solution_content(
+        self, response: dict[str, any]
+    ) -> dict[str, any] | None:
+        """Extract and parse solution content from OpenCode response."""
+        try:
             # For structured output, try direct JSON parsing first
-            if isinstance(response, dict) and "patches" in response:
+            if isinstance(response, dict) and ("patches" in response or "operations" in response):
                 # Response is already structured JSON
                 solution_data = response
                 logger.debug("Using direct structured JSON response for solution")
+                return solution_data
             else:
                 # Extract content from OpenCode response format
                 content = self._extract_content_from_opencode_response(response)
                 if not content:
                     logger.error("No content found in OpenCode solution response")
-                    return []
+                    return None
 
                 # For structured output, content should be valid JSON
                 if isinstance(content, str):
                     try:
                         solution_data = json.loads(content)
                         logger.debug("Parsed JSON from content string")
+                        return solution_data
                     except json.JSONDecodeError:
                         # Fallback to regex extraction for non-structured responses
                         json_match = re.search(
@@ -653,6 +745,7 @@ Respond with a JSON object containing your complete solution as specified in the
                         if json_match:
                             solution_data = json.loads(json_match.group(1))
                             logger.debug("Extracted JSON from markdown code block")
+                            return solution_data
                         else:
                             # Look for JSON object in the response
                             json_match = re.search(
@@ -661,13 +754,260 @@ Respond with a JSON object containing your complete solution as specified in the
                             if json_match:
                                 solution_data = json.loads(json_match.group(0))
                                 logger.debug("Extracted JSON from response text")
+                                return solution_data
                             else:
                                 logger.error(
                                     "No valid JSON found in OpenCode solution response"
                                 )
-                                return []
+                                return None
                 else:
-                    solution_data = content
+                    return content
+                    
+        except Exception as e:
+            logger.error(f"Failed to extract solution content: {e}")
+            return None
+
+    async def _handle_direct_operations(
+        self, solution_data: dict[str, any]
+    ) -> list[PatchCandidate]:
+        """Handle direct file operations from agent response."""
+        if not self.file_ops_service:
+            logger.warning(
+                "Direct operations requested but file operations service not available. "
+                "Falling back to patch-based approach."
+            )
+            # Convert to patch format for compatibility
+            return self._convert_operations_to_patches(solution_data)
+        
+        try:
+            operations = solution_data.get("operations", [])
+            solution_description = solution_data.get(
+                "solution_description", "Direct file operations"
+            )
+            confidence_score = float(solution_data.get("confidence_score", 0.5))
+            
+            patch_candidates = []
+            
+            for i, operation in enumerate(operations):
+                op_type = operation.get("type")
+                file_path = operation.get("file_path")
+                description = operation.get("description", "File operation")
+                
+                if not file_path:
+                    logger.error(f"Missing file_path in operation {i}")
+                    continue
+                    
+                try:
+                    if op_type == "write_file":
+                        content = operation.get("content", "")
+                        await self.file_ops_service.write_file(file_path, content)
+                        
+                        # Create patch candidate for tracking
+                        patch = PatchCandidate(
+                            content=content,
+                            description=f"{solution_description} - {description}",
+                            agent_id=self.agent_config.agent_id,
+                            file_path=file_path,
+                            line_start=0,
+                            line_end=-1,  # Indicates full file replacement
+                            confidence_score=confidence_score,
+                            metadata={
+                                "model": self.agent_config.model_name,
+                                "temperature": self.agent_config.temperature,
+                                "specialized_role": self.agent_config.specialized_role,
+                                "opencode_session": self.session_id,
+                                "operation_type": "direct_write",
+                                "direct_operation": True,
+                            },
+                        )
+                        patch_candidates.append(patch)
+                        
+                    elif op_type == "delete_file":
+                        await self.file_ops_service.delete_file(file_path)
+                        
+                        # Create patch candidate for tracking
+                        patch = PatchCandidate(
+                            content="",
+                            description=f"{solution_description} - {description}",
+                            agent_id=self.agent_config.agent_id,
+                            file_path=file_path,
+                            line_start=0,
+                            line_end=-1,
+                            confidence_score=confidence_score,
+                            metadata={
+                                "model": self.agent_config.model_name,
+                                "temperature": self.agent_config.temperature,
+                                "specialized_role": self.agent_config.specialized_role,
+                                "opencode_session": self.session_id,
+                                "operation_type": "direct_delete",
+                                "direct_operation": True,
+                            },
+                        )
+                        patch_candidates.append(patch)
+                        
+                    else:
+                        logger.warning(f"Unknown operation type: {op_type}")
+                        
+                except (FileOperationError, SecurityViolationError) as e:
+                    logger.error(f"File operation failed for {file_path}: {e}")
+                    # Continue with other operations
+                    
+            logger.info(
+                f"Successfully executed {len(patch_candidates)} direct operations"
+            )
+            return patch_candidates
+            
+        except Exception as e:
+            logger.error(f"Failed to handle direct operations: {e}")
+            return []
+    
+    def _handle_patch_based_response(
+        self, solution_data: dict[str, any]
+    ) -> list[PatchCandidate]:
+        """Handle traditional patch-based response (existing logic)."""
+        try:
+            # Validate required fields
+            if "patches" not in solution_data:
+                logger.error("Missing 'patches' field in solution response")
+                return []
+
+            if "confidence_score" not in solution_data:
+                logger.error("Missing 'confidence_score' field in solution response")
+                return []
+
+            # Extract solution metadata
+            solution_description = solution_data.get(
+                "solution_description", "No description provided"
+            )
+            overall_confidence = float(solution_data.get("confidence_score", 0.5))
+
+            # Parse individual patches
+            patch_candidates = []
+            for i, patch_data in enumerate(solution_data["patches"]):
+                # Validate required fields for each patch
+                required_fields = [
+                    "file_path",
+                    "content",
+                    "line_start",
+                    "line_end",
+                    "description",
+                ]
+                for field in required_fields:
+                    if field not in patch_data:
+                        logger.error(f"Missing required field in patch {i}: {field}")
+                        continue
+
+                # Create PatchCandidate
+                patch = PatchCandidate(
+                    content=patch_data["content"],
+                    description=f"{solution_description} - {patch_data['description']}",
+                    agent_id=self.agent_config.agent_id,
+                    file_path=patch_data["file_path"],
+                    line_start=int(patch_data["line_start"]),
+                    line_end=int(patch_data["line_end"]),
+                    confidence_score=overall_confidence,  # Use overall solution confidence
+                    metadata={
+                        "model": self.agent_config.model_name,
+                        "temperature": self.agent_config.temperature,
+                        "specialized_role": self.agent_config.specialized_role,
+                        "opencode_session": self.session_id,
+                        "solution_description": solution_description,
+                        "solution_patch_index": i,
+                        "total_patches_in_solution": len(solution_data["patches"]),
+                        "direct_operation": False,
+                    },
+                )
+                patch_candidates.append(patch)
+
+            logger.info(
+                f"Successfully parsed {len(patch_candidates)} patches from solution"
+            )
+            return patch_candidates
+            
+        except Exception as e:
+            logger.error(f"Failed to handle patch-based response: {e}")
+            return []
+    
+    def _convert_operations_to_patches(
+        self, solution_data: dict[str, any]
+    ) -> list[PatchCandidate]:
+        """Convert direct operations to patch format for compatibility.
+        
+        Used as fallback when direct operations are requested but 
+        file operations service is not available.
+        """
+        try:
+            operations = solution_data.get("operations", [])
+            solution_description = solution_data.get(
+                "solution_description", "Converted from direct operations"
+            )
+            confidence_score = float(solution_data.get("confidence_score", 0.5))
+            
+            patch_candidates = []
+            
+            for i, operation in enumerate(operations):
+                op_type = operation.get("type")
+                file_path = operation.get("file_path")
+                description = operation.get("description", "File operation")
+                
+                if not file_path:
+                    logger.error(f"Missing file_path in operation {i}")
+                    continue
+                    
+                if op_type == "write_file":
+                    content = operation.get("content", "")
+                    
+                    # Create patch candidate for full file replacement
+                    patch = PatchCandidate(
+                        content=content,
+                        description=f"{solution_description} - {description}",
+                        agent_id=self.agent_config.agent_id,
+                        file_path=file_path,
+                        line_start=0,
+                        line_end=-1,  # Indicates full file replacement
+                        confidence_score=confidence_score,
+                        metadata={
+                            "model": self.agent_config.model_name,
+                            "temperature": self.agent_config.temperature,
+                            "specialized_role": self.agent_config.specialized_role,
+                            "opencode_session": self.session_id,
+                            "operation_type": "converted_write",
+                            "direct_operation": False,
+                            "original_operation_type": op_type,
+                        },
+                    )
+                    patch_candidates.append(patch)
+                    
+                elif op_type == "delete_file":
+                    # Create patch candidate for file deletion
+                    patch = PatchCandidate(
+                        content="",
+                        description=f"{solution_description} - {description}",
+                        agent_id=self.agent_config.agent_id,
+                        file_path=file_path,
+                        line_start=0,
+                        line_end=-1,
+                        confidence_score=confidence_score,
+                        metadata={
+                            "model": self.agent_config.model_name,
+                            "temperature": self.agent_config.temperature,
+                            "specialized_role": self.agent_config.specialized_role,
+                            "opencode_session": self.session_id,
+                            "operation_type": "converted_delete",
+                            "direct_operation": False,
+                            "original_operation_type": op_type,
+                        },
+                    )
+                    patch_candidates.append(patch)
+                    
+            logger.info(
+                f"Converted {len(patch_candidates)} operations to patches"
+            )
+            return patch_candidates
+            
+        except Exception as e:
+            logger.error(f"Failed to convert operations to patches: {e}")
+            return []
 
             # Validate required fields
             if "patches" not in solution_data:

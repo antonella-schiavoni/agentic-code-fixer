@@ -2,7 +2,7 @@
 # This example shows a minimal setup for fixing Python code
 
 # Repository settings
-repository_path: "/path/to/your/repository"
+repository_path: "/Users/antonellaschiavoni/antonella-projects/math-operations-repo"
 problem_description: "Fix the bug in the authentication module where users cannot log in"
 # target_files has been removed - the system now automatically discovers relevant files through vector search
 exclude_patterns: #TODO: Does it make sense to include exclude_patterns here?
@@ -11,12 +11,12 @@ exclude_patterns: #TODO: Does it make sense to include exclude_patterns here?
   - ".git"
   - "node_modules"
   - "*.log"
+apply_patch_to_repository: true  # Set to false to only test patches without applying them to the original repository
 
-# Number of candidate solutions to generate
-num_candidate_solutions: 8
+# Reduced number of candidate solutions for faster evaluation
+num_candidate_solutions: 3
 
-# Agent configurations 
-#TODO: Does it make sense to include agents here?
+# Single agent for faster patch generation
 agents:
   - agent_id: "general_fixer"
     model_name: "claude-sonnet-4-5-20250929"
@@ -24,20 +24,6 @@ agents:
     max_tokens: 2048
     system_prompt: "You are a skilled Python developer focused on fixing bugs while maintaining code quality."
     specialized_role: "general"
-
-  - agent_id: "security_expert"
-    model_name: "claude-sonnet-4-5-20250929"
-    temperature: 0.5
-    max_tokens: 2048
-    system_prompt: "You are a security expert focused on secure coding practices and fixing security vulnerabilities."
-    specialized_role: "security"
-
-  - agent_id: "performance_optimizer"
-    model_name: "claude-sonnet-4-5-20250929"
-    temperature: 0.6
-    max_tokens: 2048
-    system_prompt: "You are a performance expert focused on efficient solutions and optimization."
-    specialized_role: "performance"
 
 # Vector database configuration
 vectordb:
@@ -48,33 +34,39 @@ vectordb:
   chunk_size: 500
   chunk_overlap: 50
 
-# OpenCode/Claude configuration
+# OpenCode/Claude configuration with direct file operations
 opencode:
   enabled: true
-  max_parallel_agents: 3
-  timeout_seconds: 300
+  use_sessions: true
+  max_parallel_sessions: 2
+  session_timeout_seconds: 300
+  server_host: "127.0.0.1"
+  server_port: 60181
+  enable_shell_execution: false
+  enable_code_analysis: true
+  enable_direct_file_ops: true  # Enable direct file operations for faster execution
 
-# Evaluation configuration
+# Evaluation configuration (optimized for speed)
 evaluation:
   method: "elo_tournament"
   model_name: "claude-sonnet-4-5-20250929"
   temperature: 0.1
-  max_tokens: 2048
+  max_tokens: 1024  # Reduced for faster evaluation
   elo_k_factor: 32
-  min_comparisons_per_patch: 3
-  confidence_threshold: 0.7
+  min_comparisons_per_patch: 1  # Reduced from 3 to 1 for speed
+  confidence_threshold: 0.6  # Slightly lower threshold
 
 # Testing configuration
 testing:
   test_command: "pytest"
-  test_timeout_seconds: 300
+  test_timeout_seconds: 180  # Reduced timeout
   pre_test_commands: []
   post_test_commands: []
   fail_on_regression: true
 
 # Logging configuration
 logging:
-  level: "INFO"
+  level: "INFO"  # Reduced from DEBUG for less verbose output
   output_dir: "./experiments"
   log_file: "agentic_code_fixer.log"
   save_patches: true

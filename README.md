@@ -172,6 +172,86 @@ opencode:
   provider_name: "opencode"
 ```
 
+### Direct File Operations (Experimental)
+
+**⚠️ EXPERIMENTAL FEATURE - Use with caution in production environments**
+
+The system now supports **Direct File Operations**, allowing AI agents to write files directly instead of generating traditional patches. This provides faster iteration for simple changes while maintaining safety boundaries.
+
+#### Enabling Direct File Operations
+
+```yaml
+opencode:
+  enable_direct_file_ops: true  # Default: false
+```
+
+#### How It Works
+
+When enabled, agents can choose between two approaches:
+
+1. **Direct Operations** (preferred for small changes):
+   - Agents write complete file contents directly
+   - Suitable for 1-3 files, <500 lines each
+   - Faster execution, immediate results
+   - Automatic diff generation for audit trails
+
+2. **Traditional Patches** (for complex changes):
+   - Line-by-line patch generation
+   - Better for 4+ files or >500 lines
+   - Precise control over specific changes
+   - Existing evaluation and testing pipeline
+
+#### Safety Features
+
+- **Repository Confinement**: Operations limited to repository boundaries
+- **File Type Restrictions**: Only allowed extensions (.py, .js, .ts, .yml, etc.)
+- **Path Protection**: Cannot access .git, .env, secrets, or system directories
+- **Size Limits**: 1MB per file, 10MB total per session, max 100 files
+- **Audit Logging**: Complete operation history with diffs
+- **Code Quality Validation**: Automatic linting (ruff, pyright) for Python files
+
+#### Migration Guide
+
+```bash
+# 1. Update your configuration
+echo "  enable_direct_file_ops: false  # Start with disabled" >> config.yaml
+
+# 2. Test in a safe environment
+# Run experiments on non-production code first
+
+# 3. Enable gradually
+# Set enable_direct_file_ops: true after validation
+
+# 4. Monitor operation logs
+# Check ./experiments/{id}/patches/ for audit trails
+```
+
+#### When to Use Direct Operations
+
+**✅ Good for:**
+- Simple bug fixes
+- Adding new small files
+- Configuration updates
+- Documentation changes
+- Single-file refactoring
+
+**❌ Avoid for:**
+- Complex multi-file refactoring
+- Large-scale architectural changes
+- Production-critical systems (until thoroughly tested)
+- Files containing secrets or sensitive data
+
+#### Rollback Plan
+
+If issues arise, disable the feature immediately:
+
+```yaml
+opencode:
+  enable_direct_file_ops: false
+```
+
+Existing patch-based evaluation and application will continue to work normally.
+
 ## Usage Examples
 
 ### Basic Bug Fix

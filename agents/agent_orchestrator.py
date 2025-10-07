@@ -81,6 +81,29 @@ class AgentOrchestrator:
             f"Initialized orchestrator with {len(self.agents)} agents using OpenCode SST"
         )
 
+    def initialize_file_operations(
+        self, repo_path: str, enable_direct_ops: bool = False
+    ) -> None:
+        """Initialize file operations for all agents.
+        
+        Args:
+            repo_path: Path to the repository root directory.
+            enable_direct_ops: Whether to enable direct file operations.
+        """
+        logger.info(f"Initializing file operations for {len(self.agents)} agents")
+        
+        for agent in self.agents:
+            try:
+                agent.initialize_file_operations(repo_path, enable_direct_ops)
+                logger.debug(
+                    f"Initialized file operations for agent {agent.agent_config.agent_id}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to initialize file operations for agent "
+                    f"{agent.agent_config.agent_id}: {e}"
+                )
+
     def _initialize_agents(self) -> None:
         """Initialize all configured agents."""
         for agent_config in self.config.agents:

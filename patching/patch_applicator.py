@@ -90,8 +90,50 @@ class PatchApplicator:
             True if the patch was successfully applied, False otherwise.
         """
         repo_path = Path(repo_path)
-        target_file = repo_path / patch.file_path
-
+        
+        # Normalize patch file path to be relative to repo_path
+        patch_file_path = Path(patch.file_path)
+        if patch_file_path.is_absolute():
+            logger.warning(
+                f"Patch has absolute file path: {patch.file_path}. "
+                f"Converting to relative path for sandbox isolation."
+            )
+            # Try to extract relative path by looking for common repo structure patterns
+            # This handles both root files and nested files properly
+            path_parts = patch_file_path.parts
+            
+            # Look for common project directory patterns to find where the relative path starts
+            relative_start_idx = None
+            common_patterns = ["src", "lib", "tests", "test", "app", "code"]
+            
+            # Find the last occurrence of a known project root or take the filename
+            for i in range(len(path_parts) - 1, -1, -1):
+                part = path_parts[i]
+                # If we find a Python file, check if parent directories suggest project structure
+                if part.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.c', '.h')):
+                    # For files directly in common patterns, use the pattern + file
+                    if i > 0 and path_parts[i-1] in common_patterns:
+                        relative_start_idx = i - 1
+                        break
+                    # Otherwise just use the filename (assume it's in repo root)
+                    elif i == len(path_parts) - 1:  # It's the filename
+                        relative_start_idx = i
+                        break
+            
+            if relative_start_idx is not None:
+                patch_file_path = Path(*path_parts[relative_start_idx:])
+            else:
+                # Fallback: just use the filename
+                patch_file_path = patch_file_path.name
+                
+            logger.info(f"Normalized patch file path to: {patch_file_path}")
+        
+        target_file = repo_path / patch_file_path
+        
+        logger.info(
+            f"Applying patch {patch.id} to target file: {target_file.absolute()}"
+        )
+        
         if not target_file.exists():
             logger.error(f"Target file does not exist: {target_file}")
             return False
@@ -108,32 +150,61 @@ class PatchApplicator:
             with open(target_file, encoding="utf-8") as f:
                 lines = f.readlines()
 
-            # Apply patch by replacing lines
-            if patch.line_end >= len(lines):
+            # Convert 1-indexed line numbers (from agent) to 0-indexed (for array access)
+            # Agents provide human-readable line numbers starting from 1
+            line_start_0idx = patch.line_start - 1
+            line_end_0idx = patch.line_end - 1
+            
+            # Validate line range
+            if line_start_0idx < 0 or line_end_0idx >= len(lines) or line_start_0idx > line_end_0idx:
                 logger.error(
-                    f"Patch line range exceeds file length: {patch.line_end} >= {len(lines)}"
+                    f"Invalid patch line range: lines {patch.line_start}-{patch.line_end} "
+                    f"(0-indexed: {line_start_0idx}-{line_end_0idx}) for file with {len(lines)} lines"
                 )
                 return False
 
             # Replace the specified line range with patch content
             patch_lines = patch.content.split("\n")
+            # Ensure proper newline handling to prevent concatenation with following lines
             if not patch.content.endswith("\n"):
-                patch_lines = [line + "\n" for line in patch_lines[:-1]] + [
-                    patch_lines[-1]
-                ]
-            else:
+                # Add newlines to all lines including the last one
                 patch_lines = [line + "\n" for line in patch_lines]
+            else:
+                patch_lines = [line + "\n" for line in patch_lines[:-1]] + [patch_lines[-1]]
 
-            # Apply the patch
+            # Apply the patch using 0-indexed line numbers
             new_lines = (
-                lines[: patch.line_start] + patch_lines + lines[patch.line_end + 1 :]
+                lines[: line_start_0idx] + patch_lines + lines[line_end_0idx + 1 :]
             )
 
             # Write modified content back to file
             with open(target_file, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
-
-            logger.info(f"Applied patch {patch.id} to {target_file}")
+            
+            # Validate patch was applied correctly by reading back the file
+            with open(target_file, encoding="utf-8") as f:
+                verification_lines = f.readlines()
+            
+            # Check that the patched lines match expected content
+            actual_patched_lines = verification_lines[line_start_0idx:line_start_0idx + len(patch_lines)]
+            expected_lines = patch_lines
+            
+            if actual_patched_lines == expected_lines:
+                logger.info(
+                    f"✅ Patch {patch.id} successfully applied and verified at {target_file.absolute()}"
+                )
+                logger.debug(
+                    f"Patched content (lines {patch.line_start}-{patch.line_start + len(patch_lines) - 1}): "
+                    f"{''.join(actual_patched_lines).strip()}"
+                )
+            else:
+                logger.error(
+                    f"❌ Patch {patch.id} verification failed! Expected vs actual content mismatch."
+                )
+                logger.error(f"Expected: {expected_lines}")
+                logger.error(f"Actual: {actual_patched_lines}")
+                return False
+            
             return True
 
         except Exception as e:
@@ -173,10 +244,12 @@ class PatchApplicator:
             for cmd in self.config.pre_test_commands:
                 self._run_command(cmd, repo_path)
 
-            # Run main test command
-            # TODO: We might need an LLM call with MCP to understand how to run the tests.
+            # Run main test command with proper isolation
+            # Force pytest to use the current directory as rootdir to prevent auto-discovery
+            # of parent directory configuration files
+            isolated_command = self._isolate_test_command(self.config.test_command, repo_path)
             result = self._run_command(
-                self.config.test_command,
+                isolated_command,
                 repo_path,
                 timeout=self.config.test_timeout_seconds,
             )
@@ -469,3 +542,43 @@ class PatchApplicator:
         baseline_set = set(baseline_failures)
         current_set = set(current_failures)
         return list(current_set - baseline_set)
+    
+    def _isolate_test_command(self, command: str, repo_path: Path) -> str:
+        """Modify test command to prevent auto-discovery of parent directory configs.
+        
+        Adds appropriate flags to testing frameworks to force them to use the current
+        directory as the project root, preventing auto-discovery of configuration files
+        in parent directories that could interfere with test isolation.
+        
+        Args:
+            command: Original test command string.
+            repo_path: Path to the test environment directory.
+            
+        Returns:
+            Modified command string with isolation flags.
+        """
+        command = command.strip()
+        
+        # Handle pytest commands
+        if command.startswith(('pytest', 'python -m pytest')):
+            # Force pytest to use current directory as rootdir and ignore parent configs
+            # Use relative path '.' to avoid path duplication issues
+            isolation_flags = "--rootdir=. --override-ini='addopts='"
+            if 'pytest' in command and '--rootdir' not in command:
+                return f"{command} {isolation_flags}"
+        
+        # Handle other test frameworks (unittest, nose, etc.)
+        elif command.startswith('python -m unittest'):
+            # unittest doesn't have the same auto-discovery issue, but ensure we start from current dir
+            if '-s' not in command:  # -s specifies start directory
+                return f"{command} -s ."
+        
+        # For other commands, return as-is but log a warning
+        else:
+            logger.warning(
+                f"Unknown test command format: {command}. "
+                f"Cannot apply test isolation. This may cause issues if parent "
+                f"directories contain test configuration files."
+            )
+        
+        return command

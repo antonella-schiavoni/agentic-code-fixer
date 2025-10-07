@@ -76,6 +76,15 @@ class AgenticCodeFixer:
         # Initialize components
         self.code_indexer = CodeIndexer(config.vectordb, config.opencode)
         self.agent_orchestrator = AgentOrchestrator(config, self.code_indexer)
+        
+        # Initialize file operations for agents if enabled
+        if config.opencode.enable_direct_file_ops:
+            logger.info("Direct file operations enabled for agents")
+            self.agent_orchestrator.initialize_file_operations(
+                repo_path=config.repository_path,
+                enable_direct_ops=True
+            )
+        
         self.patch_evaluator = PatchEvaluator(config.evaluation, config.opencode)
         self.patch_applicator = PatchApplicator(config.testing, config.opencode)
         self.elo_ranker = EloRanker(
@@ -118,8 +127,9 @@ class AgenticCodeFixer:
         1. Codebase indexing for context retrieval
         2. Multi-agent patch generation with diverse approaches
         3. Comprehensive patch evaluation using ELO tournament ranking
-        4. Winning patch application and validation testing
-        5. Result logging and comprehensive reporting
+        4. Winning patch application and validation testing in isolated environment
+        5. Winning patch application to original repository (if tests pass)
+        6. Result logging and comprehensive reporting
 
         Returns:
             ExperimentMetadata containing complete experiment results, timing
@@ -150,6 +160,17 @@ class AgenticCodeFixer:
 
             # Phase 4: Apply and test the winning patch
             test_result = await self._apply_and_test_patch(winning_patch)
+
+            # Phase 5: Apply winning patch to original repository if tests passed and enabled
+            if test_result.passed and self.config.apply_patch_to_repository:
+                await self._apply_patch_to_original_repository(winning_patch)
+            elif test_result.passed and not self.config.apply_patch_to_repository:
+                self.experiment_logger.log_info(
+                    f"Patch {winning_patch.id} tested successfully but not applied to original repository (apply_patch_to_repository=False)"
+                )
+                logger.info(
+                    f"Winning patch {winning_patch.id} tested successfully but not applied to original repository due to configuration"
+                )
 
             # Update experiment metadata
             end_time = datetime.now()
@@ -537,6 +558,63 @@ class AgenticCodeFixer:
             f"Efficient pre-evaluation validation completed: {len(valid_patches)}/{len(patches)} patches valid"
         )
         return valid_patches
+    
+    async def _apply_patch_to_original_repository(self, patch) -> bool:
+        """Apply the winning patch to the original repository after successful testing.
+        
+        This method applies the tested and validated patch to the original repository,
+        making the fix permanent. It includes safety checks and detailed logging to
+        ensure the patch is applied correctly.
+        
+        Args:
+            patch: PatchCandidate that passed testing and should be applied permanently.
+            
+        Returns:
+            True if the patch was successfully applied to the original repository,
+            False if the application failed.
+        """
+        self.experiment_logger.log_info(
+            f"Applying winning patch {patch.id} to original repository..."
+        )
+        logger.info(
+            f"Applying winning patch {patch.id} to original repository at {self.config.repository_path}"
+        )
+        
+        try:
+            # Apply the patch to the original repository
+            success = self.patch_applicator.apply_patch(
+                patch=patch,
+                repo_path=self.config.repository_path,
+                create_backup=True  # Always create backup when modifying original repo
+            )
+            
+            if success:
+                self.experiment_logger.log_info(
+                    f"✅ Successfully applied winning patch {patch.id} to original repository"
+                )
+                logger.info(
+                    f"✅ Winning patch {patch.id} successfully applied to original repository"
+                )
+                # Update patch status to indicate it's been applied to the original repo
+                self.patch_manager.update_patch_status(patch.id, PatchStatus.APPLIED)
+                return True
+            else:
+                self.experiment_logger.log_error(
+                    f"❌ Failed to apply winning patch {patch.id} to original repository"
+                )
+                logger.error(
+                    f"❌ Failed to apply winning patch {patch.id} to original repository"
+                )
+                return False
+                
+        except Exception as e:
+            self.experiment_logger.log_error(
+                f"❌ Exception while applying patch {patch.id} to original repository: {e}"
+            )
+            logger.error(
+                f"❌ Exception while applying patch {patch.id} to original repository: {e}"
+            )
+            return False
 
     def _get_original_code(self, file_path: str) -> str:
         """Retrieve the original source code from the specified file.
