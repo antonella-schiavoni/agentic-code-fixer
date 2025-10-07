@@ -16,6 +16,9 @@ apply_patch_to_repository: true  # Set to false to only test patches without app
 num_candidate_solutions: 6
 
 # Multiple agents for diverse patch generation
+# TODO: Improve patch diversity by having each agent generate multiple alternative
+# patches per solution, or use the generate_diverse_patches() method to create
+# parameter variations, rather than requiring one agent per patch
 agents:
   - agent_id: "general_fixer"
     model_name: "claude-sonnet-4-5-20250929"
@@ -36,6 +39,27 @@ agents:
     temperature: 0.9
     max_tokens: 2048
     system_prompt: "You are a creative Python developer who explores innovative solutions while maintaining code correctness."
+    specialized_role: "general"
+    
+  - agent_id: "analytical_fixer"
+    model_name: "claude-sonnet-4-5-20250929"
+    temperature: 0.1
+    max_tokens: 2048
+    system_prompt: "You are an analytical Python developer who focuses on precise, methodical solutions with detailed reasoning."
+    specialized_role: "general"
+    
+  - agent_id: "pragmatic_fixer"
+    model_name: "claude-sonnet-4-5-20250929"
+    temperature: 0.5
+    max_tokens: 2048
+    system_prompt: "You are a pragmatic Python developer focused on practical, efficient solutions that get the job done."
+    specialized_role: "general"
+    
+  - agent_id: "defensive_fixer"
+    model_name: "claude-sonnet-4-5-20250929"
+    temperature: 0.2
+    max_tokens: 2048
+    system_prompt: "You are a defensive Python developer who prioritizes robustness, error handling, and edge case consideration."
     specialized_role: "general"
 
 # Vector database configuration
