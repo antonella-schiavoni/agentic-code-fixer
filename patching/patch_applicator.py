@@ -131,23 +131,21 @@ class PatchApplicator:
             logger.debug(f"DEBUG: First 3 lines: {lines[:3]}")
             logger.debug(f"DEBUG: Last 3 lines: {lines[-3:]}")
 
-            # Convert 1-indexed line numbers (from agent) to 0-indexed (for array access)
-            # Agents provide human-readable line numbers starting from 1
-            line_start_0idx = patch.line_start - 1
-            line_end_0idx = patch.line_end - 1
+            # Agents provide 0-indexed line numbers (consistent with array access)
+            line_start_0idx = patch.line_start
+            line_end_0idx = patch.line_end
             
             # DEBUG: Log patch details
             logger.debug(f"DEBUG: Patch content length: {len(patch.content)} chars")
             logger.debug(f"DEBUG: Patch content repr: {repr(patch.content[:200])}...")  # First 200 chars
-            logger.debug(f"DEBUG: Patch targets lines {patch.line_start}-{patch.line_end} (1-indexed)")
-            logger.debug(f"DEBUG: Converted to 0-indexed: {line_start_0idx}-{line_end_0idx}")
+            logger.debug(f"DEBUG: Patch targets lines {patch.line_start}-{patch.line_end} (0-indexed)")
             logger.debug(f"DEBUG: File has {len(lines)} lines (0-indexed: 0-{len(lines)-1})")
             
             # Validate line range - support both replacement and appending
             if line_start_0idx < 0:
                 logger.error(
                     f"Invalid patch line range: line_start {patch.line_start} "
-                    f"(0-indexed: {line_start_0idx}) cannot be negative"
+                    f"cannot be negative (0-indexed)"
                 )
                 return False
             
@@ -165,26 +163,24 @@ class PatchApplicator:
                 # For append operations, allow line_start to be at or beyond file end
                 if line_start_0idx > len(lines):
                     logger.error(
-                        f"Invalid append operation: line_start {patch.line_start} "
-                        f"(0-indexed: {line_start_0idx}) cannot skip lines. "
-                        f"File has {len(lines)} lines, max append position is {len(lines) + 1}"
+                        f"Invalid append operation: line_start {patch.line_start} (0-indexed) "
+                        f"cannot skip lines. File has {len(lines)} lines, max append position is {len(lines)}"
                     )
                     return False
                 logger.info(
                     f"Append operation detected: adding {line_end_0idx - line_start_0idx + 1} "
-                    f"lines starting at position {line_start_0idx + 1}"
+                    f"lines starting at position {line_start_0idx}"
                 )
             else:
                 # For replacement operations, ensure we don't go beyond file bounds
                 if line_end_0idx >= len(lines):
                     logger.error(
-                        f"Invalid patch line range: line_end {patch.line_end} "
-                        f"(0-indexed: {line_end_0idx}) exceeds file length. "
-                        f"File has {len(lines)} lines (0-indexed: 0-{len(lines)-1})"
+                        f"Invalid patch line range: line_end {patch.line_end} (0-indexed) "
+                        f"exceeds file length. File has {len(lines)} lines (0-indexed: 0-{len(lines)-1})"
                     )
                     return False
                 logger.info(
-                    f"Replacement operation: replacing lines {line_start_0idx + 1}-{line_end_0idx + 1} "
+                    f"Replacement operation: replacing lines {line_start_0idx}-{line_end_0idx} "
                     f"({line_end_0idx - line_start_0idx + 1} lines)"
                 )
             

@@ -141,13 +141,13 @@ class OpenCodeAgent:
                                 },
                                 "line_start": {
                                     "type": "integer",
-                                    "description": "Starting line number (1-indexed, as shown in the provided context) of the first line to replace",
-                                    "minimum": 1,
+                                    "description": "Starting line number (0-indexed, as shown in the provided context) of the first line to replace",
+                                    "minimum": 0,
                                 },
                                 "line_end": {
                                     "type": "integer",
-                                    "description": "Ending line number (1-indexed, as shown in the provided context) of the last line to replace (inclusive)",
-                                    "minimum": 1,
+                                    "description": "Ending line number (0-indexed, as shown in the provided context) of the last line to replace (inclusive)",
+                                    "minimum": 0,
                                 },
                                 "description": {
                                     "type": "string",
@@ -274,13 +274,13 @@ class OpenCodeAgent:
                                 },
                                 "line_start": {
                                     "type": "integer",
-                                    "description": "Starting line number (1-indexed, as shown in the provided context) of the first line to replace",
-                                    "minimum": 1,
+                                    "description": "Starting line number (0-indexed, as shown in the provided context) of the first line to replace",
+                                    "minimum": 0,
                                 },
                                 "line_end": {
                                     "type": "integer",
-                                    "description": "Ending line number (1-indexed, as shown in the provided context) of the last line to replace (inclusive)",
-                                    "minimum": 1,
+                                    "description": "Ending line number (0-indexed, as shown in the provided context) of the last line to replace (inclusive)",
+                                    "minimum": 0,
                                 },
                                 "confidence_score": {
                                     "type": "number",
@@ -451,8 +451,8 @@ Analyze the problem carefully and provide a precise fix that:
 
 You will respond with a structured JSON object containing:
 - content: The exact replacement code
-- line_start: Starting line number (1-indexed, as shown in the context)
-- line_end: Ending line number (1-indexed, as shown in the context)
+- line_start: Starting line number (0-indexed, as shown in the context)
+- line_end: Ending line number (0-indexed, as shown in the context)
 - confidence_score: Your confidence in this solution (0.0-1.0)
 - description: Clear explanation of what the fix accomplishes
 
@@ -467,10 +467,10 @@ The JSON schema is enforced, so ensure all required fields are provided.
         formatted_contexts = []
         for i, context in enumerate(contexts):
             # Add line numbers to help agents identify correct line ranges
-            # Use 1-indexed numbering (human-readable) to match system prompt
+            # Use 0-indexed numbering (consistent with array access and programming convention)
             lines = context.content.split("\n")
             numbered_content = "\n".join(
-                f"{idx+1:2d}|{line}" for idx, line in enumerate(lines)
+                f"{idx:2d}|{line}" for idx, line in enumerate(lines)
             )
 
             formatted_contexts.append(
@@ -483,8 +483,8 @@ Context {i + 1} - FILE: {context.file_path} ({context.language}):
 Functions: {", ".join(context.relevant_functions) if context.relevant_functions else "None"}
 Dependencies: {", ".join(context.dependencies) if context.dependencies else "None"}
 
-IMPORTANT: The line numbers shown above (e.g., "1|", "2|") are for THIS FILE ONLY ({context.file_path}).
-When creating a patch for this file, use these exact line numbers as shown.
+IMPORTANT: The line numbers shown above (e.g., "0|", "1|") are 0-indexed for THIS FILE ONLY ({context.file_path}).
+When creating a patch for this file, use these exact line numbers as shown (first line is 0, not 1).
             """.strip()
             )
 
@@ -667,7 +667,7 @@ Respond with a JSON object in this format:
     {{
       "file_path": "The file to modify",
       "content": "The exact replacement code for the specific lines",
-      "line_start": 1,
+      "line_start": 0,
       "line_end": 10,
       "description": "What this specific patch accomplishes"
     }}
@@ -675,7 +675,7 @@ Respond with a JSON object in this format:
   "confidence_score": 0.85
 }}
 
-IMPORTANT: Use 1-indexed line numbers as shown in the provided context (first line is 1, not 0).
+IMPORTANT: Use 0-indexed line numbers as shown in the provided context (first line is 0, not 1).
 
 CRITICAL DOCSTRING TARGETING RULES:
 - When improving docstrings: Replace ONLY the existing docstring lines (triple quotes), NOT the function definition or body
