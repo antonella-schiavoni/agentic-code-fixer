@@ -475,13 +475,16 @@ The JSON schema is enforced, so ensure all required fields are provided.
 
             formatted_contexts.append(
                 f"""
-Context {i + 1} - {context.file_path} ({context.language}):
+Context {i + 1} - FILE: {context.file_path} ({context.language}):
 ```{context.language}
 {numbered_content}
 ```
 
 Functions: {", ".join(context.relevant_functions) if context.relevant_functions else "None"}
 Dependencies: {", ".join(context.dependencies) if context.dependencies else "None"}
+
+IMPORTANT: The line numbers shown above (e.g., "1|", "2|") are for THIS FILE ONLY ({context.file_path}).
+When creating a patch for this file, use these exact line numbers as shown.
             """.strip()
             )
 
@@ -664,13 +667,15 @@ Respond with a JSON object in this format:
     {{
       "file_path": "The file to modify",
       "content": "The exact replacement code for the specific lines",
-      "line_start": 0,
+      "line_start": 1,
       "line_end": 10,
       "description": "What this specific patch accomplishes"
     }}
   ],
   "confidence_score": 0.85
 }}
+
+IMPORTANT: Use 1-indexed line numbers as shown in the provided context (first line is 1, not 0).
 
 CRITICAL DOCSTRING TARGETING RULES:
 - When improving docstrings: Replace ONLY the existing docstring lines (triple quotes), NOT the function definition or body
