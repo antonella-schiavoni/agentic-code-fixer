@@ -20,9 +20,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PatchStatus(str, Enum):
@@ -103,6 +104,34 @@ class PatchCandidate(BaseModel):
     status: PatchStatus = Field(default=PatchStatus.GENERATED)
     created_at: datetime = Field(default_factory=datetime.now)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator('line_start', 'line_end')
+    @classmethod
+    def validate_line_numbers(cls, v):
+        """Ensure line numbers are non-negative integers."""
+        if v < 0:
+            raise ValueError(f"Line numbers must be non-negative, got {v}")
+        return v
+
+    @field_validator('line_end')
+    @classmethod
+    def validate_line_range(cls, v, info):
+        """Ensure line_end >= line_start for valid ranges."""
+        if info.data.get('line_start') is not None and v < info.data['line_start']:
+            raise ValueError(
+                f"line_end ({v}) must be >= line_start ({info.data['line_start']})"
+            )
+        return v
+
+    @field_validator('file_path')
+    @classmethod
+    def validate_file_path(cls, v):
+        """Ensure file_path is relative, not absolute."""
+        if Path(v).is_absolute():
+            raise ValueError(
+                f"file_path must be relative to repository root, got absolute path: {v}"
+            )
+        return v
 
 
 class EvaluationResult(BaseModel):
