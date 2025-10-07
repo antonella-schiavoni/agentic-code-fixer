@@ -237,6 +237,13 @@ class PatchApplicator:
                 )
                 logger.error(f"Expected: {expected_lines}")
                 logger.error(f"Actual: {actual_patched_lines}")
+                
+                # Restore backup and clean it up since patch failed verification
+                if backup_file and backup_file.exists():
+                    shutil.copy2(backup_file, target_file)
+                    backup_file.unlink()  # Delete backup after restoring
+                    logger.info("Restored file from backup and removed backup file")
+                
                 return False
             
             return True
@@ -244,10 +251,11 @@ class PatchApplicator:
         except Exception as e:
             logger.error(f"Failed to apply patch {patch.id}: {e}")
 
-            # Restore backup if it exists
+            # Restore backup if it exists and clean it up
             if backup_file and backup_file.exists():
                 shutil.copy2(backup_file, target_file)
-                logger.info("Restored file from backup")
+                backup_file.unlink()  # Delete backup after restoring
+                logger.info("Restored file from backup and removed backup file")
 
             return False
 
@@ -458,12 +466,36 @@ class PatchApplicator:
             True if the patch was successfully reverted, False otherwise.
         """
         repo_path = Path(repo_path)
-        target_file = repo_path / patch.file_path
+        
+        # Normalize patch file path (same logic as apply_patch)
+        patch_file_path = Path(patch.file_path)
+        if patch_file_path.is_absolute():
+            logger.debug(
+                f"Patch has absolute file path: {patch.file_path}. "
+                f"Converting to relative path for revert operation."
+            )
+            # Use just the filename as fallback
+            patch_file_path = patch_file_path.name
+        
+        target_file = repo_path / patch_file_path
         backup_file = target_file.with_suffix(target_file.suffix + ".backup")
 
         if not backup_file.exists():
-            logger.error(f"No backup found for {target_file}")
-            return False
+            # Backup should ONLY exist if patch was successfully applied
+            # If no backup exists, one of these scenarios applies:
+            # 1. Patch failed to apply (never got to backup stage)
+            # 2. Patch verification failed (backup was cleaned up during failure)
+            # 3. Patch was already reverted (backup was cleaned up)
+            if target_file.exists():
+                logger.debug(
+                    f"No backup found for {target_file}. "
+                    f"Patch {patch.id} likely was not successfully applied or already reverted. "
+                    f"No action needed."
+                )
+                return True  # Return True since no revert is needed
+            else:
+                logger.warning(f"Neither backup nor target file exists for {target_file}")
+                return True  # Return True to avoid blocking other reverts
 
         try:
             shutil.copy2(backup_file, target_file)
