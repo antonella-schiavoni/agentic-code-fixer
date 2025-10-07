@@ -132,10 +132,16 @@ class PatchApplicator:
             line_end_0idx = patch.line_end
             
             # Validate line range (fail fast as per rules)
-            if line_start_0idx < 0 or line_end_0idx >= len(lines) or line_start_0idx > line_end_0idx:
+            # Support appending new lines: line_end can be beyond current file length
+            max_valid_line_end = len(lines)  # Allow appending at the end
+            
+            if (line_start_0idx < 0 or 
+                line_start_0idx > max_valid_line_end or 
+                line_end_0idx < line_start_0idx):
                 logger.error(
                     f"Invalid patch line range: lines {patch.line_start}-{patch.line_end} "
-                    f"for file with {len(lines)} lines (valid range: 0-{len(lines)-1})"
+                    f"for file with {len(lines)} lines. Valid start range: 0-{max_valid_line_end}, "
+                    f"line_end must be >= line_start"
                 )
                 return False
 
@@ -149,9 +155,21 @@ class PatchApplicator:
                 patch_lines = [line + "\n" for line in patch.content.split("\n")]
 
             # Apply the patch using 0-indexed line numbers
-            new_lines = (
-                lines[: line_start_0idx] + patch_lines + lines[line_end_0idx + 1 :]
-            )
+            # Handle appending beyond current file length
+            if line_end_0idx >= len(lines):
+                # Appending new lines to the file
+                if line_start_0idx >= len(lines):
+                    # Adding completely new lines - pad with empty lines if there's a gap
+                    padding_lines = ["\n"] * (line_start_0idx - len(lines))
+                    new_lines = lines + padding_lines + patch_lines
+                else:
+                    # Replacing from existing line and extending beyond file end
+                    new_lines = lines[: line_start_0idx] + patch_lines
+            else:
+                # Normal replacement within existing file bounds
+                new_lines = (
+                    lines[: line_start_0idx] + patch_lines + lines[line_end_0idx + 1 :]
+                )
 
             # Write modified content back to file
             with open(target_file, "w", encoding="utf-8") as f:

@@ -248,6 +248,35 @@ class TestPatchApplicatorLineRanges:
             mock_absolute = "/home/user/project/src/main.py"
             normalized_src = normalize_patch_file_path(mock_absolute)
             assert normalized_src == "src/main.py"
+    
+    def test_apply_patch_append_new_lines(self):
+        """Test appending new lines beyond the current file length."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_path = Path(temp_dir)
+            test_file = repo_path / "test_file.py"
+            
+            # Create test file with 3 lines (0-2)
+            test_file.write_text("line 0\nline 1\nline 2\n")
+            
+            # Create patch that appends beyond current file length
+            patch = PatchCandidate(
+                content="new line 3\nnew line 4\n",
+                description="Append new lines",
+                agent_id="test_agent",
+                file_path="test_file.py",
+                line_start=3,  # Beyond current file length (file has lines 0-2)
+                line_end=4,    # Appending 2 new lines
+                confidence_score=0.9
+            )
+            
+            # Apply patch
+            result = self.applicator.apply_patch(patch, repo_path)
+            assert result is True
+            
+            # Verify result
+            modified_content = test_file.read_text()
+            expected = "line 0\nline 1\nline 2\nnew line 3\nnew line 4\n"
+            assert modified_content == expected
 
 
 if __name__ == "__main__":
