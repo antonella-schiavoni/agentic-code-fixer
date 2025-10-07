@@ -449,11 +449,12 @@ class AgenticCodeFixer:
                 
                 # Return a failed test result
                 test_result = TestResult(
+                    test_command="N/A",  # Required field
                     passed=False,
                     exit_code=1,
-                    output="Failed to apply complete solution",
-                    duration_seconds=0.0,
-                    timestamp=datetime.now()
+                    stdout="Failed to apply complete solution",  # Fixed field name from 'output' to 'stdout'
+                    stderr="",  # Required field
+                    duration_seconds=0.0
                 )
                 self.experiment_logger.log_test_result(test_result, patch.id)
                 return test_result
