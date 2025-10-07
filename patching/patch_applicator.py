@@ -125,11 +125,22 @@ class PatchApplicator:
             # Read current file content
             with open(target_file, encoding="utf-8") as f:
                 lines = f.readlines()
+            
+            # DEBUG: Log original file state
+            logger.debug(f"DEBUG: Original file {target_file} has {len(lines)} lines")
+            logger.debug(f"DEBUG: First 3 lines: {lines[:3]}")
+            logger.debug(f"DEBUG: Last 3 lines: {lines[-3:]}")
 
             # Use zero-indexed line numbers directly as per PatchCandidate specification
             # Line numbers are already zero-indexed in PatchCandidate
             line_start_0idx = patch.line_start
             line_end_0idx = patch.line_end
+            
+            # DEBUG: Log patch details
+            logger.debug(f"DEBUG: Patch content length: {len(patch.content)} chars")
+            logger.debug(f"DEBUG: Patch content repr: {repr(patch.content[:200])}...")  # First 200 chars
+            logger.debug(f"DEBUG: Patch targets lines {line_start_0idx}-{line_end_0idx} (0-indexed)")
+            logger.debug(f"DEBUG: File has {len(lines)} lines (0-{len(lines)-1})")
             
             # Validate line range (fail fast as per rules)
             # Support appending new lines: both line_start and line_end can be beyond current file length
@@ -168,31 +179,49 @@ class PatchApplicator:
                     lines[: line_start_0idx] + patch_lines + lines[line_end_0idx + 1 :]
                 )
 
+            # DEBUG: Log what we're about to write
+            logger.debug(f"DEBUG: About to write {len(new_lines)} lines to {target_file}")
+            logger.debug(f"DEBUG: First 5 new_lines to write:")
+            for i, line in enumerate(new_lines[:5]):
+                logger.debug(f"  {i}: {repr(line)}")
+            logger.debug(f"DEBUG: Lines around patch area ({line_start_0idx}-{line_start_0idx+len(patch_lines)-1}):")
+            for i in range(max(0, line_start_0idx-1), min(len(new_lines), line_start_0idx+len(patch_lines)+1)):
+                marker = ">>>" if line_start_0idx <= i < line_start_0idx+len(patch_lines) else "   "
+                logger.debug(f"{marker}{i}: {repr(new_lines[i])}")
+            
             # Write modified content back to file
+            logger.debug(f"DEBUG: Writing to file: {target_file.absolute()}")
             with open(target_file, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
-            
-            # DEBUG: Log what we actually wrote
-            logger.debug(f"DEBUG: Wrote {len(new_lines)} lines to file:")
-            for i, line in enumerate(new_lines[:10]):  # Show first 10 lines
-                logger.debug(f"  {i}: {repr(line)}")
+            logger.debug(f"DEBUG: File write completed")
             
             # Validate patch was applied correctly by reading back the file
+            logger.debug(f"DEBUG: Reading back file for verification: {target_file.absolute()}")
             with open(target_file, encoding="utf-8") as f:
                 verification_lines = f.readlines()
             
-            # DEBUG: Log what we read back
-            logger.debug(f"DEBUG: Read back {len(verification_lines)} lines from file:")
-            for i, line in enumerate(verification_lines[:10]):  # Show first 10 lines
+            logger.debug(f"DEBUG: Read back {len(verification_lines)} lines from file")
+            logger.debug(f"DEBUG: First 5 lines read back:")
+            for i, line in enumerate(verification_lines[:5]):
                 logger.debug(f"  {i}: {repr(line)}")
+            logger.debug(f"DEBUG: Lines around patch area after read ({line_start_0idx}-{line_start_0idx+len(patch_lines)-1}):")
+            for i in range(max(0, line_start_0idx-1), min(len(verification_lines), line_start_0idx+len(patch_lines)+1)):
+                marker = ">>>" if line_start_0idx <= i < line_start_0idx+len(patch_lines) else "   "
+                logger.debug(f"{marker}{i}: {repr(verification_lines[i])}")
             
             # Check that the patched lines match expected content
             actual_patched_lines = verification_lines[line_start_0idx:line_start_0idx + len(patch_lines)]
             expected_lines = patch_lines
             
             # DEBUG: Log the slice extraction
-            logger.debug(f"DEBUG: Extracting slice [{line_start_0idx}:{line_start_0idx + len(patch_lines)}]")
+            logger.debug(f"DEBUG: Extracting slice [{line_start_0idx}:{line_start_0idx + len(patch_lines)}] for verification")
             logger.debug(f"DEBUG: Expected {len(expected_lines)} lines, got {len(actual_patched_lines)} lines")
+            logger.debug(f"DEBUG: Expected patch_lines:")
+            for i, line in enumerate(expected_lines):
+                logger.debug(f"  Expected[{i}]: {repr(line)}")
+            logger.debug(f"DEBUG: Actual patched lines from file:")
+            for i, line in enumerate(actual_patched_lines):
+                logger.debug(f"  Actual[{i}]: {repr(line)}")
             
             if actual_patched_lines == expected_lines:
                 logger.info(
@@ -384,10 +413,16 @@ class PatchApplicator:
         else:
             test_env = Path(tempfile.mkdtemp(prefix="agentic_code_fixer_"))
 
+        logger.info(f"Creating test environment from {repo_path} to {test_env}")
+        
         # Copy repository to test environment
         shutil.copytree(repo_path, test_env, ignore=shutil.ignore_patterns(".git"))
 
         logger.info(f"Created test environment: {test_env}")
+        
+        # Debug: Log file counts and sizes for verification
+        logger.debug(f"Test environment created with {sum(1 for _ in test_env.rglob('*') if _.is_file())} files")
+        
         return test_env
 
     def cleanup_test_environment(self, test_env_path: str | Path) -> None:
