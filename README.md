@@ -270,7 +270,7 @@ agentic-code-fixer run config.yaml
 
 ```bash
 # Use the advanced configuration template
-cp agentpatchai/examples/advanced_config.yaml my_advanced_config.yaml
+cp agentpatchai/config/advanced_config.yaml my_advanced_config.yaml
 
 # Edit the config file for your specific repository
 # Then run the experiment
@@ -281,7 +281,7 @@ agentic-code-fixer run my_advanced_config.yaml --output-dir ./my-experiments
 
 ```bash
 # Use the JavaScript-specific configuration
-cp agentpatchai/examples/javascript_config.yaml js_config.yaml
+cp agentpatchai/config/javascript_config.yaml js_config.yaml
 
 # Customize for your Node.js project
 # Run the experiment
