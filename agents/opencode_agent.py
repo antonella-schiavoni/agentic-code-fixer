@@ -141,13 +141,13 @@ class OpenCodeAgent:
                                 },
                                 "line_start": {
                                     "type": "integer",
-                                    "description": "Starting line number (0-indexed) of the first line to replace",
-                                    "minimum": 0,
+                                    "description": "Starting line number (1-indexed, as shown in the provided context) of the first line to replace",
+                                    "minimum": 1,
                                 },
                                 "line_end": {
                                     "type": "integer",
-                                    "description": "Ending line number (0-indexed) of the last line to replace (inclusive)",
-                                    "minimum": 0,
+                                    "description": "Ending line number (1-indexed, as shown in the provided context) of the last line to replace (inclusive)",
+                                    "minimum": 1,
                                 },
                                 "description": {
                                     "type": "string",
@@ -274,13 +274,13 @@ class OpenCodeAgent:
                                 },
                                 "line_start": {
                                     "type": "integer",
-                                    "description": "Starting line number (0-indexed) of the first line to replace",
-                                    "minimum": 0,
+                                    "description": "Starting line number (1-indexed, as shown in the provided context) of the first line to replace",
+                                    "minimum": 1,
                                 },
                                 "line_end": {
                                     "type": "integer",
-                                    "description": "Ending line number (0-indexed) of the last line to replace (inclusive)",
-                                    "minimum": 0,
+                                    "description": "Ending line number (1-indexed, as shown in the provided context) of the last line to replace (inclusive)",
+                                    "minimum": 1,
                                 },
                                 "confidence_score": {
                                     "type": "number",
@@ -451,8 +451,8 @@ Analyze the problem carefully and provide a precise fix that:
 
 You will respond with a structured JSON object containing:
 - content: The exact replacement code
-- line_start: Starting line number (0-indexed)
-- line_end: Ending line number (0-indexed)
+- line_start: Starting line number (1-indexed, as shown in the context)
+- line_end: Ending line number (1-indexed, as shown in the context)
 - confidence_score: Your confidence in this solution (0.0-1.0)
 - description: Clear explanation of what the fix accomplishes
 
@@ -467,9 +467,10 @@ The JSON schema is enforced, so ensure all required fields are provided.
         formatted_contexts = []
         for i, context in enumerate(contexts):
             # Add line numbers to help agents identify correct line ranges
+            # Use 1-indexed numbering (human-readable) to match system prompt
             lines = context.content.split("\n")
             numbered_content = "\n".join(
-                f"{idx:2d}|{line}" for idx, line in enumerate(lines)
+                f"{idx+1:2d}|{line}" for idx, line in enumerate(lines)
             )
 
             formatted_contexts.append(
