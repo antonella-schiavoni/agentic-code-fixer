@@ -569,9 +569,9 @@ class PatchApplicator:
         
         # Handle other test frameworks (unittest, nose, etc.)
         elif command.startswith('python -m unittest'):
-            # unittest doesn't have the same auto-discovery issue, but ensure we start from current dir
-            if '-s' not in command:  # -s specifies start directory
-                return f"{command} -s ."
+            # unittest doesn't have the same auto-discovery issue as pytest
+            # and doesn't need special isolation flags
+            pass
         
         # For other commands, return as-is but log a warning
         else:
