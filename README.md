@@ -204,7 +204,7 @@ When enabled, agents can choose between two approaches:
 #### Safety Features
 
 - **Repository Confinement**: Operations limited to repository boundaries
-- **File Type Restrictions**: Only allowed extensions (.py, .js, .ts, .yml, etc.)
+- **File Type Restrictions**: Only allowed extensions (.py, .yml, .yaml, .toml, .txt, etc.)
 - **Path Protection**: Cannot access .git, .env, secrets, or system directories
 - **Size Limits**: 1MB per file, 10MB total per session, max 100 files
 - **Audit Logging**: Complete operation history with diffs
@@ -275,17 +275,6 @@ cp agentpatchai/config/advanced_config.yaml my_advanced_config.yaml
 # Edit the config file for your specific repository
 # Then run the experiment
 agentic-code-fixer run my_advanced_config.yaml --output-dir ./my-experiments
-```
-
-### JavaScript/Node.js Projects
-
-```bash
-# Use the JavaScript-specific configuration
-cp agentpatchai/config/javascript_config.yaml js_config.yaml
-
-# Customize for your Node.js project
-# Run the experiment
-agentic-code-fixer run js_config.yaml
 ```
 
 ## CLI Commands
