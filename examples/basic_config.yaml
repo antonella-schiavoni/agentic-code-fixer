@@ -3,7 +3,7 @@
 
 # Repository settings
 repository_path: "/Users/antonellaschiavoni/antonella-projects/math-operations-repo"
-problem_description: ""
+problem_description: "Fix the bugs in the math operations: add function should add not multiply, and divide function should divide by b not by 0"
 exclude_patterns: #TODO: Does it make sense to include exclude_patterns here?
   - "*.pyc"
   - "__pycache__"
@@ -78,7 +78,7 @@ opencode:
   max_parallel_sessions: 2
   session_timeout_seconds: 300
   server_host: "127.0.0.1"
-  server_port: 60181
+  server_port: 63667
   enable_shell_execution: false
   enable_code_analysis: true
   enable_direct_file_ops: true  # Enable direct file operations for faster execution

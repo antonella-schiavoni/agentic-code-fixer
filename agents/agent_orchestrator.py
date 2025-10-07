@@ -112,6 +112,8 @@ class AgentOrchestrator:
                 opencode_config=self.opencode_config,
                 role_manager=self.role_manager,
             )
+            # Set repository path for proper path normalization
+            agent.set_repository_path(self.config.repository_path)
             self.agents.append(agent)
 
     async def generate_patches(

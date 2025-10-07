@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core.config import OpenCodeConfig, TestingConfig
+from core.path_utils import normalize_patch_file_path
 from core.types import PatchCandidate, TestResult
 from opencode_client import OpenCodeClient
 
@@ -92,41 +93,16 @@ class PatchApplicator:
         repo_path = Path(repo_path)
         
         # Normalize patch file path to be relative to repo_path
-        patch_file_path = Path(patch.file_path)
-        if patch_file_path.is_absolute():
+        original_path = patch.file_path
+        if Path(original_path).is_absolute():
             logger.warning(
-                f"Patch has absolute file path: {patch.file_path}. "
+                f"Patch has absolute file path: {original_path}. "
                 f"Converting to relative path for sandbox isolation."
             )
-            # Try to extract relative path by looking for common repo structure patterns
-            # This handles both root files and nested files properly
-            path_parts = patch_file_path.parts
-            
-            # Look for common project directory patterns to find where the relative path starts
-            relative_start_idx = None
-            common_patterns = ["src", "lib", "tests", "test", "app", "code"]
-            
-            # Find the last occurrence of a known project root or take the filename
-            for i in range(len(path_parts) - 1, -1, -1):
-                part = path_parts[i]
-                # If we find a Python file, check if parent directories suggest project structure
-                if part.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.c', '.h')):
-                    # For files directly in common patterns, use the pattern + file
-                    if i > 0 and path_parts[i-1] in common_patterns:
-                        relative_start_idx = i - 1
-                        break
-                    # Otherwise just use the filename (assume it's in repo root)
-                    elif i == len(path_parts) - 1:  # It's the filename
-                        relative_start_idx = i
-                        break
-            
-            if relative_start_idx is not None:
-                patch_file_path = Path(*path_parts[relative_start_idx:])
-            else:
-                # Fallback: just use the filename
-                patch_file_path = patch_file_path.name
-                
+            patch_file_path = normalize_patch_file_path(original_path)
             logger.info(f"Normalized patch file path to: {patch_file_path}")
+        else:
+            patch_file_path = original_path
         
         target_file = repo_path / patch_file_path
         
@@ -149,17 +125,27 @@ class PatchApplicator:
             # Read current file content
             with open(target_file, encoding="utf-8") as f:
                 lines = f.readlines()
+            
+            # DEBUG: Log original file state
+            logger.debug(f"DEBUG: Original file {target_file} has {len(lines)} lines")
+            logger.debug(f"DEBUG: First 3 lines: {lines[:3]}")
+            logger.debug(f"DEBUG: Last 3 lines: {lines[-3:]}")
 
-            # Convert 1-indexed line numbers (from agent) to 0-indexed (for array access)
-            # Agents provide human-readable line numbers starting from 1
-            line_start_0idx = patch.line_start - 1
-            line_end_0idx = patch.line_end - 1
+            # Agents provide 0-indexed line numbers (consistent with array access)
+            line_start_0idx = patch.line_start
+            line_end_0idx = patch.line_end
+            
+            # DEBUG: Log patch details
+            logger.debug(f"DEBUG: Patch content length: {len(patch.content)} chars")
+            logger.debug(f"DEBUG: Patch content repr: {repr(patch.content[:200])}...")  # First 200 chars
+            logger.debug(f"DEBUG: Patch targets lines {patch.line_start}-{patch.line_end} (0-indexed)")
+            logger.debug(f"DEBUG: File has {len(lines)} lines (0-indexed: 0-{len(lines)-1})")
             
             # Validate line range - support both replacement and appending
             if line_start_0idx < 0:
                 logger.error(
                     f"Invalid patch line range: line_start {patch.line_start} "
-                    f"(0-indexed: {line_start_0idx}) cannot be negative"
+                    f"cannot be negative (0-indexed)"
                 )
                 return False
             
@@ -177,26 +163,24 @@ class PatchApplicator:
                 # For append operations, allow line_start to be at or beyond file end
                 if line_start_0idx > len(lines):
                     logger.error(
-                        f"Invalid append operation: line_start {patch.line_start} "
-                        f"(0-indexed: {line_start_0idx}) cannot skip lines. "
-                        f"File has {len(lines)} lines, max append position is {len(lines) + 1}"
+                        f"Invalid append operation: line_start {patch.line_start} (0-indexed) "
+                        f"cannot skip lines. File has {len(lines)} lines, max append position is {len(lines)}"
                     )
                     return False
                 logger.info(
                     f"Append operation detected: adding {line_end_0idx - line_start_0idx + 1} "
-                    f"lines starting at position {line_start_0idx + 1}"
+                    f"lines starting at position {line_start_0idx}"
                 )
             else:
                 # For replacement operations, ensure we don't go beyond file bounds
                 if line_end_0idx >= len(lines):
                     logger.error(
-                        f"Invalid patch line range: line_end {patch.line_end} "
-                        f"(0-indexed: {line_end_0idx}) exceeds file length. "
-                        f"File has {len(lines)} lines (0-indexed: 0-{len(lines)-1})"
+                        f"Invalid patch line range: line_end {patch.line_end} (0-indexed) "
+                        f"exceeds file length. File has {len(lines)} lines (0-indexed: 0-{len(lines)-1})"
                     )
                     return False
                 logger.info(
-                    f"Replacement operation: replacing lines {line_start_0idx + 1}-{line_end_0idx + 1} "
+                    f"Replacement operation: replacing lines {line_start_0idx}-{line_end_0idx} "
                     f"({line_end_0idx - line_start_0idx + 1} lines)"
                 )
             
@@ -220,13 +204,35 @@ class PatchApplicator:
                     lines[: line_start_0idx] + patch_lines + lines[line_end_0idx + 1 :]
                 )
 
+            # DEBUG: Log what we're about to write
+            logger.debug(f"DEBUG: About to write {len(new_lines)} lines to {target_file}")
+            logger.debug(f"DEBUG: First 5 new_lines to write:")
+            for i, line in enumerate(new_lines[:5]):
+                logger.debug(f"  {i}: {repr(line)}")
+            logger.debug(f"DEBUG: Lines around patch area ({line_start_0idx}-{line_start_0idx+len(patch_lines)-1}):")
+            for i in range(max(0, line_start_0idx-1), min(len(new_lines), line_start_0idx+len(patch_lines)+1)):
+                marker = ">>>" if line_start_0idx <= i < line_start_0idx+len(patch_lines) else "   "
+                logger.debug(f"{marker}{i}: {repr(new_lines[i])}")
+            
             # Write modified content back to file
+            logger.debug(f"DEBUG: Writing to file: {target_file.absolute()}")
             with open(target_file, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
+            logger.debug(f"DEBUG: File write completed")
             
             # Validate patch was applied correctly by reading back the file
+            logger.debug(f"DEBUG: Reading back file for verification: {target_file.absolute()}")
             with open(target_file, encoding="utf-8") as f:
                 verification_lines = f.readlines()
+            
+            logger.debug(f"DEBUG: Read back {len(verification_lines)} lines from file")
+            logger.debug(f"DEBUG: First 5 lines read back:")
+            for i, line in enumerate(verification_lines[:5]):
+                logger.debug(f"  {i}: {repr(line)}")
+            logger.debug(f"DEBUG: Lines around patch area after read ({line_start_0idx}-{line_start_0idx+len(patch_lines)-1}):")
+            for i in range(max(0, line_start_0idx-1), min(len(verification_lines), line_start_0idx+len(patch_lines)+1)):
+                marker = ">>>" if line_start_0idx <= i < line_start_0idx+len(patch_lines) else "   "
+                logger.debug(f"{marker}{i}: {repr(verification_lines[i])}")
             
             # Check that the patched lines match expected content
             if is_append:
@@ -236,6 +242,16 @@ class PatchApplicator:
                 # For replacement operations, check the specified range
                 actual_patched_lines = verification_lines[line_start_0idx:line_start_0idx + len(patch_lines)]
             expected_lines = patch_lines
+            
+            # DEBUG: Log the slice extraction
+            logger.debug(f"DEBUG: Extracting slice [{line_start_0idx}:{line_start_0idx + len(patch_lines)}] for verification")
+            logger.debug(f"DEBUG: Expected {len(expected_lines)} lines, got {len(actual_patched_lines)} lines")
+            logger.debug(f"DEBUG: Expected patch_lines:")
+            for i, line in enumerate(expected_lines):
+                logger.debug(f"  Expected[{i}]: {repr(line)}")
+            logger.debug(f"DEBUG: Actual patched lines from file:")
+            for i, line in enumerate(actual_patched_lines):
+                logger.debug(f"  Actual[{i}]: {repr(line)}")
             
             if actual_patched_lines == expected_lines:
                 logger.info(
@@ -251,6 +267,13 @@ class PatchApplicator:
                 )
                 logger.error(f"Expected: {expected_lines}")
                 logger.error(f"Actual: {actual_patched_lines}")
+                
+                # Restore backup and clean it up since patch failed verification
+                if backup_file and backup_file.exists():
+                    shutil.copy2(backup_file, target_file)
+                    backup_file.unlink()  # Delete backup after restoring
+                    logger.info("Restored file from backup and removed backup file")
+                
                 return False
             
             return True
@@ -258,10 +281,11 @@ class PatchApplicator:
         except Exception as e:
             logger.error(f"Failed to apply patch {patch.id}: {e}")
 
-            # Restore backup if it exists
+            # Restore backup if it exists and clean it up
             if backup_file and backup_file.exists():
                 shutil.copy2(backup_file, target_file)
-                logger.info("Restored file from backup")
+                backup_file.unlink()  # Delete backup after restoring
+                logger.info("Restored file from backup and removed backup file")
 
             return False
 
@@ -427,10 +451,16 @@ class PatchApplicator:
         else:
             test_env = Path(tempfile.mkdtemp(prefix="agentic_code_fixer_"))
 
+        logger.info(f"Creating test environment from {repo_path} to {test_env}")
+        
         # Copy repository to test environment
         shutil.copytree(repo_path, test_env, ignore=shutil.ignore_patterns(".git"))
 
         logger.info(f"Created test environment: {test_env}")
+        
+        # Debug: Log file counts and sizes for verification
+        logger.debug(f"Test environment created with {sum(1 for _ in test_env.rglob('*') if _.is_file())} files")
+        
         return test_env
 
     def cleanup_test_environment(self, test_env_path: str | Path) -> None:
@@ -445,7 +475,7 @@ class PatchApplicator:
         test_env_path = Path(test_env_path)
         if test_env_path.exists():
             shutil.rmtree(test_env_path)
-        logger.info(f"Cleaned up test environment: {test_env_path}")
+            logger.info(f"Cleaned up test environment: {test_env_path}")
 
     def revert_patch(
         self,
@@ -467,48 +497,35 @@ class PatchApplicator:
         """
         repo_path = Path(repo_path)
         
-        # Normalize patch file path to be relative to repo_path (same logic as apply_patch)
+        # Normalize patch file path (same logic as apply_patch)
         patch_file_path = Path(patch.file_path)
         if patch_file_path.is_absolute():
             logger.debug(
                 f"Patch has absolute file path: {patch.file_path}. "
                 f"Converting to relative path for revert operation."
             )
-            # Use the same normalization logic as apply_patch
-            path_parts = patch_file_path.parts
-            
-            # Look for common project directory patterns to find where the relative path starts
-            relative_start_idx = None
-            common_patterns = ["src", "lib", "tests", "test", "app", "code"]
-            
-            # Find the last occurrence of a known project root or take the filename
-            for i in range(len(path_parts) - 1, -1, -1):
-                part = path_parts[i]
-                # If we find a Python file, check if parent directories suggest project structure
-                if part.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.c', '.h')):
-                    # For files directly in common patterns, use the pattern + file
-                    if i > 0 and path_parts[i-1] in common_patterns:
-                        relative_start_idx = i - 1
-                        break
-                    # Otherwise just use the filename (assume it's in repo root)
-                    elif i == len(path_parts) - 1:  # It's the filename
-                        relative_start_idx = i
-                        break
-            
-            if relative_start_idx is not None:
-                patch_file_path = Path(*path_parts[relative_start_idx:])
-            else:
-                # Fallback: just use the filename
-                patch_file_path = patch_file_path.name
-                
-            logger.debug(f"Normalized patch file path to: {patch_file_path}")
+            # Use just the filename as fallback
+            patch_file_path = patch_file_path.name
         
         target_file = repo_path / patch_file_path
         backup_file = target_file.with_suffix(target_file.suffix + ".backup")
 
         if not backup_file.exists():
-            logger.error(f"No backup found for {target_file}")
-            return False
+            # Backup should ONLY exist if patch was successfully applied
+            # If no backup exists, one of these scenarios applies:
+            # 1. Patch failed to apply (never got to backup stage)
+            # 2. Patch verification failed (backup was cleaned up during failure)
+            # 3. Patch was already reverted (backup was cleaned up)
+            if target_file.exists():
+                logger.debug(
+                    f"No backup found for {target_file}. "
+                    f"Patch {patch.id} likely was not successfully applied or already reverted. "
+                    f"No action needed."
+                )
+                return True  # Return True since no revert is needed
+            else:
+                logger.warning(f"Neither backup nor target file exists for {target_file}")
+                return True  # Return True to avoid blocking other reverts
 
         try:
             shutil.copy2(backup_file, target_file)

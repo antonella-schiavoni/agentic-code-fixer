@@ -14,8 +14,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 
 from core.config import OpenCodeConfig
+from core.path_utils import to_repo_relative
 from core.role_manager import RoleManager
 from core.types import AgentConfig, CodeContext, PatchCandidate
 from opencode_client import OpenCodeClient
@@ -73,6 +75,7 @@ class OpenCodeAgent:
         self.session_id: str | None = None
         self.role_manager = role_manager or RoleManager()
         self.file_ops_service: FileOperationsService | None = None
+        self.repository_path: Path | None = None
 
         logger.info(f"Initialized OpenCode agent {agent_config.agent_id}")
 
@@ -138,12 +141,12 @@ class OpenCodeAgent:
                                 },
                                 "line_start": {
                                     "type": "integer",
-                                    "description": "Starting line number (0-indexed) of the first line to replace",
+                                    "description": "Starting line number (0-indexed, as shown in the provided context) of the first line to replace",
                                     "minimum": 0,
                                 },
                                 "line_end": {
                                     "type": "integer",
-                                    "description": "Ending line number (0-indexed) of the last line to replace (inclusive)",
+                                    "description": "Ending line number (0-indexed, as shown in the provided context) of the last line to replace (inclusive)",
                                     "minimum": 0,
                                 },
                                 "description": {
@@ -271,12 +274,12 @@ class OpenCodeAgent:
                                 },
                                 "line_start": {
                                     "type": "integer",
-                                    "description": "Starting line number (0-indexed) of the first line to replace",
+                                    "description": "Starting line number (0-indexed, as shown in the provided context) of the first line to replace",
                                     "minimum": 0,
                                 },
                                 "line_end": {
                                     "type": "integer",
-                                    "description": "Ending line number (0-indexed) of the last line to replace (inclusive)",
+                                    "description": "Ending line number (0-indexed, as shown in the provided context) of the last line to replace (inclusive)",
                                     "minimum": 0,
                                 },
                                 "confidence_score": {
@@ -350,6 +353,28 @@ class OpenCodeAgent:
         self.session_id = session_id
         logger.debug(
             f"Agent {self.agent_config.agent_id} assigned to session {session_id}"
+        )
+    
+    def set_repository_path(self, repository_path: str | Path) -> None:
+        """Set the repository path for this agent.
+        
+        Args:
+            repository_path: Path to the repository root directory.
+        """
+        self.repository_path = Path(repository_path)
+        logger.debug(
+            f"Agent {self.agent_config.agent_id} set repository path: {self.repository_path}"
+        )
+    
+    def set_repository_path(self, repository_path: str | Path) -> None:
+        """Set the repository path for this agent.
+        
+        Args:
+            repository_path: Path to the repository root directory.
+        """
+        self.repository_path = Path(repository_path)
+        logger.debug(
+            f"Agent {self.agent_config.agent_id} set repository path: {self.repository_path}"
         )
 
     def initialize_file_operations(
@@ -426,8 +451,8 @@ Analyze the problem carefully and provide a precise fix that:
 
 You will respond with a structured JSON object containing:
 - content: The exact replacement code
-- line_start: Starting line number (0-indexed)
-- line_end: Ending line number (0-indexed)
+- line_start: Starting line number (0-indexed, as shown in the context)
+- line_end: Ending line number (0-indexed, as shown in the context)
 - confidence_score: Your confidence in this solution (0.0-1.0)
 - description: Clear explanation of what the fix accomplishes
 
@@ -442,6 +467,7 @@ The JSON schema is enforced, so ensure all required fields are provided.
         formatted_contexts = []
         for i, context in enumerate(contexts):
             # Add line numbers to help agents identify correct line ranges
+            # Use 0-indexed numbering (consistent with array access and programming convention)
             lines = context.content.split("\n")
             numbered_content = "\n".join(
                 f"{idx:2d}|{line}" for idx, line in enumerate(lines)
@@ -449,13 +475,16 @@ The JSON schema is enforced, so ensure all required fields are provided.
 
             formatted_contexts.append(
                 f"""
-Context {i + 1} - {context.file_path} ({context.language}):
+Context {i + 1} - FILE: {context.file_path} ({context.language}):
 ```{context.language}
 {numbered_content}
 ```
 
 Functions: {", ".join(context.relevant_functions) if context.relevant_functions else "None"}
 Dependencies: {", ".join(context.dependencies) if context.dependencies else "None"}
+
+IMPORTANT: The line numbers shown above (e.g., "0|", "1|") are 0-indexed for THIS FILE ONLY ({context.file_path}).
+When creating a patch for this file, use these exact line numbers as shown (first line is 0, not 1).
             """.strip()
             )
 
@@ -537,12 +566,18 @@ Dependencies: {", ".join(context.dependencies) if context.dependencies else "Non
                     logger.error(f"Missing required field in patch response: {field}")
                     return None
 
-            # Create PatchCandidate
+            # Create PatchCandidate with normalized file path
+            normalized_file_path = (
+                to_repo_relative(target_file, self.repository_path) 
+                if self.repository_path and Path(target_file).is_absolute()
+                else target_file
+            )
+            
             patch = PatchCandidate(
                 content=patch_data["content"],
                 description=patch_data["description"],
                 agent_id=self.agent_config.agent_id,
-                file_path=target_file,
+                file_path=normalized_file_path,
                 line_start=int(patch_data["line_start"]),
                 line_end=int(patch_data["line_end"]),
                 confidence_score=float(patch_data["confidence_score"]),
@@ -639,6 +674,8 @@ Respond with a JSON object in this format:
   ],
   "confidence_score": 0.85
 }}
+
+IMPORTANT: Use 0-indexed line numbers as shown in the provided context (first line is 0, not 1).
 
 CRITICAL DOCSTRING TARGETING RULES:
 - When improving docstrings: Replace ONLY the existing docstring lines (triple quotes), NOT the function definition or body
@@ -802,8 +839,13 @@ Respond with a JSON object containing your complete solution as specified in the
                         content = operation.get("content", "")
                         await self.file_ops_service.write_file(file_path, content)
                         
-                        # Normalize file path and create patch candidate for tracking
-                        normalized_file_path = self._normalize_file_path(file_path)
+                        # Create patch candidate for tracking with normalized file path
+                        normalized_file_path = (
+                            to_repo_relative(file_path, self.repository_path) 
+                            if self.repository_path and Path(file_path).is_absolute()
+                            else file_path
+                        )
+                        
                         patch = PatchCandidate(
                             content=content,
                             description=f"{solution_description} - {description}",
@@ -826,8 +868,13 @@ Respond with a JSON object containing your complete solution as specified in the
                     elif op_type == "delete_file":
                         await self.file_ops_service.delete_file(file_path)
                         
-                        # Normalize file path and create patch candidate for tracking  
-                        normalized_file_path = self._normalize_file_path(file_path)
+                        # Create patch candidate for tracking with normalized file path
+                        normalized_file_path = (
+                            to_repo_relative(file_path, self.repository_path) 
+                            if self.repository_path and Path(file_path).is_absolute()
+                            else file_path
+                        )
+                        
                         patch = PatchCandidate(
                             content="",
                             description=f"{solution_description} - {description}",
@@ -899,11 +946,14 @@ Respond with a JSON object containing your complete solution as specified in the
                         logger.error(f"Missing required field in patch {i}: {field}")
                         continue
 
-                # Normalize file path to be relative to repository root
-                raw_file_path = patch_data["file_path"]
-                normalized_file_path = self._normalize_file_path(raw_file_path)
+                # Create PatchCandidate with normalized file path
+                file_path = patch_data["file_path"]
+                normalized_file_path = (
+                    to_repo_relative(file_path, self.repository_path) 
+                    if self.repository_path and Path(file_path).is_absolute()
+                    else file_path
+                )
                 
-                # Create PatchCandidate
                 patch = PatchCandidate(
                     content=patch_data["content"],
                     description=f"{solution_description} - {patch_data['description']}",
@@ -963,12 +1013,18 @@ Respond with a JSON object containing your complete solution as specified in the
                 if op_type == "write_file":
                     content = operation.get("content", "")
                     
-                    # Create patch candidate for full file replacement
+                    # Create patch candidate for full file replacement with normalized file path
+                    normalized_file_path = (
+                        to_repo_relative(file_path, self.repository_path) 
+                        if self.repository_path and Path(file_path).is_absolute()
+                        else file_path
+                    )
+                    
                     patch = PatchCandidate(
                         content=content,
                         description=f"{solution_description} - {description}",
                         agent_id=self.agent_config.agent_id,
-                        file_path=file_path,
+                        file_path=normalized_file_path,
                         line_start=0,
                         line_end=-1,  # Indicates full file replacement
                         confidence_score=confidence_score,
@@ -985,12 +1041,18 @@ Respond with a JSON object containing your complete solution as specified in the
                     patch_candidates.append(patch)
                     
                 elif op_type == "delete_file":
-                    # Create patch candidate for file deletion
+                    # Create patch candidate for file deletion with normalized file path
+                    normalized_file_path = (
+                        to_repo_relative(file_path, self.repository_path) 
+                        if self.repository_path and Path(file_path).is_absolute()
+                        else file_path
+                    )
+                    
                     patch = PatchCandidate(
                         content="",
                         description=f"{solution_description} - {description}",
                         agent_id=self.agent_config.agent_id,
-                        file_path=file_path,
+                        file_path=normalized_file_path,
                         line_start=0,
                         line_end=-1,
                         confidence_score=confidence_score,
@@ -1125,58 +1187,6 @@ Respond with a JSON object containing your complete solution as specified in the
             logger.error(f"Failed to extract content from OpenCode response: {e}")
             return ""
 
-    def _normalize_file_path(self, file_path: str) -> str:
-        """Normalize file path to be relative to repository root.
-        
-        Converts absolute paths to relative paths using the same logic as the patch applicator.
-        This ensures consistency between patch generation and application.
-        
-        Args:
-            file_path: File path (can be absolute or relative)
-            
-        Returns:
-            Relative file path suitable for repository operations
-        """
-        from pathlib import Path
-        
-        patch_file_path = Path(file_path)
-        
-        # If already relative, return as-is
-        if not patch_file_path.is_absolute():
-            return file_path
-            
-        logger.debug(f"Normalizing absolute file path: {file_path}")
-        
-        # Use same normalization logic as patch applicator
-        path_parts = patch_file_path.parts
-        
-        # Look for common project directory patterns to find where the relative path starts
-        relative_start_idx = None
-        common_patterns = ["src", "lib", "tests", "test", "app", "code"]
-        
-        # Find the last occurrence of a known project root or take the filename
-        for i in range(len(path_parts) - 1, -1, -1):
-            part = path_parts[i]
-            # If we find a source file, check if parent directories suggest project structure
-            if part.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.c', '.h')):
-                # For files directly in common patterns, use the pattern + file
-                if i > 0 and path_parts[i-1] in common_patterns:
-                    relative_start_idx = i - 1
-                    break
-                # Otherwise just use the filename (assume it's in repo root)
-                elif i == len(path_parts) - 1:  # It's the filename
-                    relative_start_idx = i
-                    break
-        
-        if relative_start_idx is not None:
-            normalized_path = str(Path(*path_parts[relative_start_idx:]))
-        else:
-            # Fallback: just use the filename
-            normalized_path = patch_file_path.name
-            
-        logger.debug(f"Normalized to relative path: {normalized_path}")
-        return normalized_path
-    
     def get_agent_stats(self) -> dict[str, any]:
         """Get statistics about this agent's performance."""
         return {
