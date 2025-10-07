@@ -131,50 +131,79 @@ class PatchApplicator:
             logger.debug(f"DEBUG: First 3 lines: {lines[:3]}")
             logger.debug(f"DEBUG: Last 3 lines: {lines[-3:]}")
 
-            # Use zero-indexed line numbers directly as per PatchCandidate specification
-            # Line numbers are already zero-indexed in PatchCandidate
-            line_start_0idx = patch.line_start
-            line_end_0idx = patch.line_end
+            # Convert 1-indexed line numbers (from agent) to 0-indexed (for array access)
+            # Agents provide human-readable line numbers starting from 1
+            line_start_0idx = patch.line_start - 1
+            line_end_0idx = patch.line_end - 1
             
             # DEBUG: Log patch details
             logger.debug(f"DEBUG: Patch content length: {len(patch.content)} chars")
             logger.debug(f"DEBUG: Patch content repr: {repr(patch.content[:200])}...")  # First 200 chars
-            logger.debug(f"DEBUG: Patch targets lines {line_start_0idx}-{line_end_0idx} (0-indexed)")
-            logger.debug(f"DEBUG: File has {len(lines)} lines (0-{len(lines)-1})")
+            logger.debug(f"DEBUG: Patch targets lines {patch.line_start}-{patch.line_end} (1-indexed)")
+            logger.debug(f"DEBUG: Converted to 0-indexed: {line_start_0idx}-{line_end_0idx}")
+            logger.debug(f"DEBUG: File has {len(lines)} lines (0-indexed: 0-{len(lines)-1})")
             
-            # Validate line range (fail fast as per rules)
-            # Support appending new lines: both line_start and line_end can be beyond current file length
-            # Only validate that line numbers are non-negative and line_end >= line_start
-            if (line_start_0idx < 0 or line_end_0idx < line_start_0idx):
+            # Validate line range - support both replacement and appending
+            if line_start_0idx < 0:
                 logger.error(
-                    f"Invalid patch line range: lines {patch.line_start}-{patch.line_end} "
-                    f"for file with {len(lines)} lines. Line numbers must be non-negative "
-                    f"and line_end must be >= line_start"
+                    f"Invalid patch line range: line_start {patch.line_start} "
+                    f"(0-indexed: {line_start_0idx}) cannot be negative"
                 )
                 return False
+            
+            if line_start_0idx > line_end_0idx:
+                logger.error(
+                    f"Invalid patch line range: line_start {patch.line_start} "
+                    f"cannot be greater than line_end {patch.line_end}"
+                )
+                return False
+            
+            # Check if this is an append operation (adding lines at the end)
+            is_append = line_start_0idx >= len(lines)
+            
+            if is_append:
+                # For append operations, allow line_start to be at or beyond file end
+                if line_start_0idx > len(lines):
+                    logger.error(
+                        f"Invalid append operation: line_start {patch.line_start} "
+                        f"(0-indexed: {line_start_0idx}) cannot skip lines. "
+                        f"File has {len(lines)} lines, max append position is {len(lines) + 1}"
+                    )
+                    return False
+                logger.info(
+                    f"Append operation detected: adding {line_end_0idx - line_start_0idx + 1} "
+                    f"lines starting at position {line_start_0idx + 1}"
+                )
+            else:
+                # For replacement operations, ensure we don't go beyond file bounds
+                if line_end_0idx >= len(lines):
+                    logger.error(
+                        f"Invalid patch line range: line_end {patch.line_end} "
+                        f"(0-indexed: {line_end_0idx}) exceeds file length. "
+                        f"File has {len(lines)} lines (0-indexed: 0-{len(lines)-1})"
+                    )
+                    return False
+                logger.info(
+                    f"Replacement operation: replacing lines {line_start_0idx + 1}-{line_end_0idx + 1} "
+                    f"({line_end_0idx - line_start_0idx + 1} lines)"
+                )
+            
 
             # Replace the specified line range with patch content
-            # Handle newlines properly: if content ends with \n, split removes empty last element
-            if patch.content.endswith("\n"):
-                # Content ends with newline, split and add newlines to each line
-                patch_lines = [line + "\n" for line in patch.content.rstrip("\n").split("\n")]
+            patch_lines = patch.content.split("\n")
+            # Ensure proper newline handling to prevent concatenation with following lines
+            if not patch.content.endswith("\n"):
+                # Add newlines to all lines including the last one
+                patch_lines = [line + "\n" for line in patch_lines]
             else:
-                # Content doesn't end with newline, split and add newlines to all
-                patch_lines = [line + "\n" for line in patch.content.split("\n")]
+                patch_lines = [line + "\n" for line in patch_lines[:-1]] + [patch_lines[-1]]
 
             # Apply the patch using 0-indexed line numbers
-            # Handle appending beyond current file length
-            if line_end_0idx >= len(lines):
-                # Appending new lines to the file
-                if line_start_0idx >= len(lines):
-                    # Adding completely new lines - pad with empty lines if there's a gap
-                    padding_lines = ["\n"] * (line_start_0idx - len(lines))
-                    new_lines = lines + padding_lines + patch_lines
-                else:
-                    # Replacing from existing line and extending beyond file end
-                    new_lines = lines[: line_start_0idx] + patch_lines
+            if is_append:
+                # For append operations, add lines at the end
+                new_lines = lines + patch_lines
             else:
-                # Normal replacement within existing file bounds
+                # For replacement operations, replace the specified range
                 new_lines = (
                     lines[: line_start_0idx] + patch_lines + lines[line_end_0idx + 1 :]
                 )
@@ -210,7 +239,12 @@ class PatchApplicator:
                 logger.debug(f"{marker}{i}: {repr(verification_lines[i])}")
             
             # Check that the patched lines match expected content
-            actual_patched_lines = verification_lines[line_start_0idx:line_start_0idx + len(patch_lines)]
+            if is_append:
+                # For append operations, check the lines at the end of the file
+                actual_patched_lines = verification_lines[-len(patch_lines):]
+            else:
+                # For replacement operations, check the specified range
+                actual_patched_lines = verification_lines[line_start_0idx:line_start_0idx + len(patch_lines)]
             expected_lines = patch_lines
             
             # DEBUG: Log the slice extraction
