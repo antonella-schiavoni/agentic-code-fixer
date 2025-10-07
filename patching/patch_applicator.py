@@ -155,13 +155,51 @@ class PatchApplicator:
             line_start_0idx = patch.line_start - 1
             line_end_0idx = patch.line_end - 1
             
-            # Validate line range
-            if line_start_0idx < 0 or line_end_0idx >= len(lines) or line_start_0idx > line_end_0idx:
+            # Validate line range - support both replacement and appending
+            if line_start_0idx < 0:
                 logger.error(
-                    f"Invalid patch line range: lines {patch.line_start}-{patch.line_end} "
-                    f"(0-indexed: {line_start_0idx}-{line_end_0idx}) for file with {len(lines)} lines"
+                    f"Invalid patch line range: line_start {patch.line_start} "
+                    f"(0-indexed: {line_start_0idx}) cannot be negative"
                 )
                 return False
+            
+            if line_start_0idx > line_end_0idx:
+                logger.error(
+                    f"Invalid patch line range: line_start {patch.line_start} "
+                    f"cannot be greater than line_end {patch.line_end}"
+                )
+                return False
+            
+            # Check if this is an append operation (adding lines at the end)
+            is_append = line_start_0idx >= len(lines)
+            
+            if is_append:
+                # For append operations, allow line_start to be at or beyond file end
+                if line_start_0idx > len(lines):
+                    logger.error(
+                        f"Invalid append operation: line_start {patch.line_start} "
+                        f"(0-indexed: {line_start_0idx}) cannot skip lines. "
+                        f"File has {len(lines)} lines, max append position is {len(lines) + 1}"
+                    )
+                    return False
+                logger.info(
+                    f"Append operation detected: adding {line_end_0idx - line_start_0idx + 1} "
+                    f"lines starting at position {line_start_0idx + 1}"
+                )
+            else:
+                # For replacement operations, ensure we don't go beyond file bounds
+                if line_end_0idx >= len(lines):
+                    logger.error(
+                        f"Invalid patch line range: line_end {patch.line_end} "
+                        f"(0-indexed: {line_end_0idx}) exceeds file length. "
+                        f"File has {len(lines)} lines (0-indexed: 0-{len(lines)-1})"
+                    )
+                    return False
+                logger.info(
+                    f"Replacement operation: replacing lines {line_start_0idx + 1}-{line_end_0idx + 1} "
+                    f"({line_end_0idx - line_start_0idx + 1} lines)"
+                )
+            
 
             # Replace the specified line range with patch content
             patch_lines = patch.content.split("\n")
@@ -173,9 +211,14 @@ class PatchApplicator:
                 patch_lines = [line + "\n" for line in patch_lines[:-1]] + [patch_lines[-1]]
 
             # Apply the patch using 0-indexed line numbers
-            new_lines = (
-                lines[: line_start_0idx] + patch_lines + lines[line_end_0idx + 1 :]
-            )
+            if is_append:
+                # For append operations, add lines at the end
+                new_lines = lines + patch_lines
+            else:
+                # For replacement operations, replace the specified range
+                new_lines = (
+                    lines[: line_start_0idx] + patch_lines + lines[line_end_0idx + 1 :]
+                )
 
             # Write modified content back to file
             with open(target_file, "w", encoding="utf-8") as f:
@@ -186,7 +229,12 @@ class PatchApplicator:
                 verification_lines = f.readlines()
             
             # Check that the patched lines match expected content
-            actual_patched_lines = verification_lines[line_start_0idx:line_start_0idx + len(patch_lines)]
+            if is_append:
+                # For append operations, check the lines at the end of the file
+                actual_patched_lines = verification_lines[-len(patch_lines):]
+            else:
+                # For replacement operations, check the specified range
+                actual_patched_lines = verification_lines[line_start_0idx:line_start_0idx + len(patch_lines)]
             expected_lines = patch_lines
             
             if actual_patched_lines == expected_lines:
@@ -397,7 +445,7 @@ class PatchApplicator:
         test_env_path = Path(test_env_path)
         if test_env_path.exists():
             shutil.rmtree(test_env_path)
-            logger.info(f"Cleaned up test environment: {test_env_path}")
+        logger.info(f"Cleaned up test environment: {test_env_path}")
 
     def revert_patch(
         self,
@@ -418,7 +466,44 @@ class PatchApplicator:
             True if the patch was successfully reverted, False otherwise.
         """
         repo_path = Path(repo_path)
-        target_file = repo_path / patch.file_path
+        
+        # Normalize patch file path to be relative to repo_path (same logic as apply_patch)
+        patch_file_path = Path(patch.file_path)
+        if patch_file_path.is_absolute():
+            logger.debug(
+                f"Patch has absolute file path: {patch.file_path}. "
+                f"Converting to relative path for revert operation."
+            )
+            # Use the same normalization logic as apply_patch
+            path_parts = patch_file_path.parts
+            
+            # Look for common project directory patterns to find where the relative path starts
+            relative_start_idx = None
+            common_patterns = ["src", "lib", "tests", "test", "app", "code"]
+            
+            # Find the last occurrence of a known project root or take the filename
+            for i in range(len(path_parts) - 1, -1, -1):
+                part = path_parts[i]
+                # If we find a Python file, check if parent directories suggest project structure
+                if part.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.c', '.h')):
+                    # For files directly in common patterns, use the pattern + file
+                    if i > 0 and path_parts[i-1] in common_patterns:
+                        relative_start_idx = i - 1
+                        break
+                    # Otherwise just use the filename (assume it's in repo root)
+                    elif i == len(path_parts) - 1:  # It's the filename
+                        relative_start_idx = i
+                        break
+            
+            if relative_start_idx is not None:
+                patch_file_path = Path(*path_parts[relative_start_idx:])
+            else:
+                # Fallback: just use the filename
+                patch_file_path = patch_file_path.name
+                
+            logger.debug(f"Normalized patch file path to: {patch_file_path}")
+        
+        target_file = repo_path / patch_file_path
         backup_file = target_file.with_suffix(target_file.suffix + ".backup")
 
         if not backup_file.exists():

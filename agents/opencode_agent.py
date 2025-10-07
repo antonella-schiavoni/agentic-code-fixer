@@ -802,12 +802,13 @@ Respond with a JSON object containing your complete solution as specified in the
                         content = operation.get("content", "")
                         await self.file_ops_service.write_file(file_path, content)
                         
-                        # Create patch candidate for tracking
+                        # Normalize file path and create patch candidate for tracking
+                        normalized_file_path = self._normalize_file_path(file_path)
                         patch = PatchCandidate(
                             content=content,
                             description=f"{solution_description} - {description}",
                             agent_id=self.agent_config.agent_id,
-                            file_path=file_path,
+                            file_path=normalized_file_path,
                             line_start=0,
                             line_end=-1,  # Indicates full file replacement
                             confidence_score=confidence_score,
@@ -825,12 +826,13 @@ Respond with a JSON object containing your complete solution as specified in the
                     elif op_type == "delete_file":
                         await self.file_ops_service.delete_file(file_path)
                         
-                        # Create patch candidate for tracking
+                        # Normalize file path and create patch candidate for tracking  
+                        normalized_file_path = self._normalize_file_path(file_path)
                         patch = PatchCandidate(
                             content="",
                             description=f"{solution_description} - {description}",
                             agent_id=self.agent_config.agent_id,
-                            file_path=file_path,
+                            file_path=normalized_file_path,
                             line_start=0,
                             line_end=-1,
                             confidence_score=confidence_score,
@@ -897,12 +899,16 @@ Respond with a JSON object containing your complete solution as specified in the
                         logger.error(f"Missing required field in patch {i}: {field}")
                         continue
 
+                # Normalize file path to be relative to repository root
+                raw_file_path = patch_data["file_path"]
+                normalized_file_path = self._normalize_file_path(raw_file_path)
+                
                 # Create PatchCandidate
                 patch = PatchCandidate(
                     content=patch_data["content"],
                     description=f"{solution_description} - {patch_data['description']}",
                     agent_id=self.agent_config.agent_id,
-                    file_path=patch_data["file_path"],
+                    file_path=normalized_file_path,
                     line_start=int(patch_data["line_start"]),
                     line_end=int(patch_data["line_end"]),
                     confidence_score=overall_confidence,  # Use overall solution confidence
@@ -1119,6 +1125,58 @@ Respond with a JSON object containing your complete solution as specified in the
             logger.error(f"Failed to extract content from OpenCode response: {e}")
             return ""
 
+    def _normalize_file_path(self, file_path: str) -> str:
+        """Normalize file path to be relative to repository root.
+        
+        Converts absolute paths to relative paths using the same logic as the patch applicator.
+        This ensures consistency between patch generation and application.
+        
+        Args:
+            file_path: File path (can be absolute or relative)
+            
+        Returns:
+            Relative file path suitable for repository operations
+        """
+        from pathlib import Path
+        
+        patch_file_path = Path(file_path)
+        
+        # If already relative, return as-is
+        if not patch_file_path.is_absolute():
+            return file_path
+            
+        logger.debug(f"Normalizing absolute file path: {file_path}")
+        
+        # Use same normalization logic as patch applicator
+        path_parts = patch_file_path.parts
+        
+        # Look for common project directory patterns to find where the relative path starts
+        relative_start_idx = None
+        common_patterns = ["src", "lib", "tests", "test", "app", "code"]
+        
+        # Find the last occurrence of a known project root or take the filename
+        for i in range(len(path_parts) - 1, -1, -1):
+            part = path_parts[i]
+            # If we find a source file, check if parent directories suggest project structure
+            if part.endswith(('.py', '.js', '.ts', '.java', '.cpp', '.c', '.h')):
+                # For files directly in common patterns, use the pattern + file
+                if i > 0 and path_parts[i-1] in common_patterns:
+                    relative_start_idx = i - 1
+                    break
+                # Otherwise just use the filename (assume it's in repo root)
+                elif i == len(path_parts) - 1:  # It's the filename
+                    relative_start_idx = i
+                    break
+        
+        if relative_start_idx is not None:
+            normalized_path = str(Path(*path_parts[relative_start_idx:]))
+        else:
+            # Fallback: just use the filename
+            normalized_path = patch_file_path.name
+            
+        logger.debug(f"Normalized to relative path: {normalized_path}")
+        return normalized_path
+    
     def get_agent_stats(self) -> dict[str, any]:
         """Get statistics about this agent's performance."""
         return {
