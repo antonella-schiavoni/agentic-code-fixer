@@ -108,9 +108,21 @@ class ExperimentLogger:
         )
         file_handler.setFormatter(formatter)
 
-        # Add handler to root logger
+        # Add handler to root logger and set root logger level
         root_logger = logging.getLogger()
         root_logger.addHandler(file_handler)
+        root_logger.setLevel(getattr(logging, self.config.level.upper()))
+        
+        # Also ensure our specific loggers are properly configured
+        specific_loggers = [
+            'patching.patch_applicator',
+            'coordinator', 
+            'experiment_logging.experiment_logger'
+        ]
+        
+        for logger_name in specific_loggers:
+            specific_logger = logging.getLogger(logger_name)
+            specific_logger.setLevel(getattr(logging, self.config.level.upper()))
 
     def log_experiment_start(self, metadata: ExperimentMetadata) -> None:
         """Log the beginning of an experiment with comprehensive metadata.
