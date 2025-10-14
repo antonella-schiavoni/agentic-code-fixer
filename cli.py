@@ -293,7 +293,7 @@ def baseline_test(
         test_command: Command to execute for running tests.
     """
     try:
-        from core import TestingConfig
+        from core.config import TestingConfig
         from patching import PatchApplicator
 
         testing_config = TestingConfig(test_command=test_command)
