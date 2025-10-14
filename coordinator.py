@@ -580,10 +580,17 @@ class AgenticCodeFixer:
                     original_timeout = self.patch_applicator.config.test_timeout_seconds
                     self.patch_applicator.config.test_timeout_seconds = validation_timeout
 
+                    # Debug: Log detailed information about the test execution
+                    logger.info(f"🧪 VALIDATION: About to run tests for solution {solution_key}")
+                    logger.info(f"🧪 VALIDATION: Test command: {self.patch_applicator.config.test_command}")
+                    logger.info(f"🧪 VALIDATION: Test environment: {shared_test_env}")
+                    logger.info(f"🧪 VALIDATION: Timeout: {validation_timeout}s")
+                    
                     try:
                         test_result = self.patch_applicator.run_tests(
                             repo_path=shared_test_env, patch_id=f"solution_{solution_key}"
                         )
+                        logger.info(f"🧪 VALIDATION: Test result for solution {solution_key}: passed={test_result.passed}, exit_code={test_result.exit_code}")
                     finally:
                         self.patch_applicator.config.test_timeout_seconds = original_timeout
 
