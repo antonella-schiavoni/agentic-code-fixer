@@ -156,11 +156,14 @@ class PatchApplicator:
                 )
                 return False
             
-            # Check if this is an append operation (adding lines at the end)
-            is_append = line_start_0idx >= len(lines)
+            # Determine operation type based on line indices relative to file length
+            is_pure_append = line_start_0idx >= len(lines)  # Pure append at EOF
+            is_file_extension = line_start_0idx < len(lines) and line_end_0idx >= len(lines)  # Replace + extend
+            is_replacement = line_start_0idx < len(lines) and line_end_0idx < len(lines)  # Pure replacement
             
-            if is_append:
-                # For append operations, allow line_start to be at or beyond file end
+            # Validate line ranges for different operation types
+            if is_pure_append:
+                # For pure append operations, allow line_start to be exactly at file end
                 if line_start_0idx > len(lines):
                     logger.error(
                         f"Invalid append operation: line_start {patch.line_start} (0-indexed) "
@@ -168,21 +171,30 @@ class PatchApplicator:
                     )
                     return False
                 logger.info(
-                    f"Append operation detected: adding {line_end_0idx - line_start_0idx + 1} "
-                    f"lines starting at position {line_start_0idx}"
+                    f"Pure append operation detected: adding {line_end_0idx - line_start_0idx + 1} "
+                    f"lines starting at position {line_start_0idx} (at EOF)"
                 )
-            else:
-                # For replacement operations, ensure we don't go beyond file bounds
-                if line_end_0idx >= len(lines):
-                    logger.error(
-                        f"Invalid patch line range: line_end {patch.line_end} (0-indexed) "
-                        f"exceeds file length. File has {len(lines)} lines (0-indexed: 0-{len(lines)-1})"
-                    )
-                    return False
+            elif is_file_extension:
+                # For file extension operations, allow line_end to exceed file length
+                # This enables replacing existing lines AND adding new lines beyond EOF
                 logger.info(
-                    f"Replacement operation: replacing lines {line_start_0idx}-{line_end_0idx} "
+                    f"File extension operation detected: replacing lines {line_start_0idx}-{len(lines)-1} "
+                    f"and extending to line {line_end_0idx} (adding {line_end_0idx - len(lines) + 1} new lines)"
+                )
+            elif is_replacement:
+                # For pure replacement operations, ensure we don't exceed file bounds
+                # This is the original validation logic, kept unchanged
+                logger.info(
+                    f"Pure replacement operation: replacing lines {line_start_0idx}-{line_end_0idx} "
                     f"({line_end_0idx - line_start_0idx + 1} lines)"
                 )
+            else:
+                # This should not happen given the logic above, but included for completeness
+                logger.error(
+                    f"Unknown operation type: line_start={line_start_0idx}, line_end={line_end_0idx}, "
+                    f"file_length={len(lines)}"
+                )
+                return False
             
 
             # Replace the specified line range with patch content
@@ -192,17 +204,27 @@ class PatchApplicator:
                 # Add newlines to all lines including the last one
                 patch_lines = [line + "\n" for line in patch_lines]
             else:
-                patch_lines = [line + "\n" for line in patch_lines[:-1]] + [patch_lines[-1]]
+                # Content ends with \n, so split() creates an extra empty string at the end
+                # Remove the empty string and add newlines to all real content lines
+                if patch_lines and patch_lines[-1] == "":
+                    patch_lines = patch_lines[:-1]  # Remove the empty string
+                patch_lines = [line + "\n" for line in patch_lines]
 
-            # Apply the patch using 0-indexed line numbers
-            if is_append:
-                # For append operations, add lines at the end
+            # Apply the patch using 0-indexed line numbers based on operation type
+            if is_pure_append:
+                # For pure append operations, add lines at the end
                 new_lines = lines + patch_lines
+            elif is_file_extension or is_replacement:
+                # For both file extension and replacement operations, use the same logic:
+                # - Replace existing lines from line_start_0idx to min(line_end_0idx, len(lines)-1)
+                # - For file extensions, this naturally extends beyond the original file
+                # - For replacements, this stays within the original file bounds
+                end_idx = min(line_end_0idx + 1, len(lines))  # Clamp to file bounds for slicing
+                new_lines = lines[:line_start_0idx] + patch_lines + lines[end_idx:]
             else:
-                # For replacement operations, replace the specified range
-                new_lines = (
-                    lines[: line_start_0idx] + patch_lines + lines[line_end_0idx + 1 :]
-                )
+                # This should not happen, but included for safety
+                logger.error(f"Unexpected operation state in patch application")
+                return False
 
             # DEBUG: Log what we're about to write
             logger.debug(f"DEBUG: About to write {len(new_lines)} lines to {target_file}")
@@ -234,13 +256,17 @@ class PatchApplicator:
                 marker = ">>>" if line_start_0idx <= i < line_start_0idx+len(patch_lines) else "   "
                 logger.debug(f"{marker}{i}: {repr(verification_lines[i])}")
             
-            # Check that the patched lines match expected content
-            if is_append:
-                # For append operations, check the lines at the end of the file
+            # Check that the patched lines match expected content based on operation type
+            if is_pure_append:
+                # For pure append operations, check the lines at the end of the file
                 actual_patched_lines = verification_lines[-len(patch_lines):]
-            else:
-                # For replacement operations, check the specified range
+            elif is_file_extension or is_replacement:
+                # For both file extension and replacement operations, check from line_start position
+                # The patch_lines should now be at the specified position regardless of operation type
                 actual_patched_lines = verification_lines[line_start_0idx:line_start_0idx + len(patch_lines)]
+            else:
+                logger.error(f"Unexpected operation state in verification")
+                return False
             expected_lines = patch_lines
             
             # DEBUG: Log the slice extraction
