@@ -1,2206 +1,0 @@
-= self.dense(hidden_states)
-        hidden_states = torch.tanh(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.out_proj(hidden_states)
-        return hidden_states
-
-
-@auto_docstring
-class T5PreTrainedModel(PreTrainedModel):
-    config: T5Config
-    load_tf_weights = load_tf_weights_in_t5
-    base_model_prefix = "transformer"
-    is_parallelizable = True
-    supports_gradient_checkpointing = True
-    _can_compile_fullgraph = True
-
-    _no_split_modules = ["T5Block"]
-    _keep_in_fp32_modules = ["wo"]
-
-    @property
-    def dummy_inputs(self):
-        input_ids = torch.tensor(DUMMY_INPUTS)
-        input_mask = torch.tensor(DUMMY_MASK)
-        dummy_inputs = {
-            "decoder_input_ids": input_ids,
-            "input_ids": input_ids,
-            "decoder_attention_mask": input_mask,
-        }
-        return dummy_inputs
-
-    def _init_weights(self, module):
-        """Initialize the weights"""
-        factor = self.config.initializer_factor  # Used for testing weights initialization
-        if isinstance(module, T5LayerNorm):
-            module.weight.data.fill_(factor * 1.0)
-        elif isinstance(
-            module,
-            (T5Model, T5ForConditionalGeneration, T5EncoderModel, T5ForQuestionAnswering),
-        ):
-            # Mesh TensorFlow embeddings initialization
-            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L1624
-            module.shared.weight.data.normal_(mean=0.0, std=factor * 1.0)
-            if hasattr(module, "lm_head") and not self.config.tie_word_embeddings:
-                module.lm_head.weight.data.normal_(mean=0.0, std=factor * 1.0)
-            if hasattr(module, "qa_outputs"):
-                module.qa_outputs.weight.data.normal_(mean=0.0, std=factor * ((self.config.d_model) ** -0.5))
-                module.qa_outputs.bias.data.zero_()
-        elif isinstance(module, T5ForTokenClassification):
-            if hasattr(module, "classifier"):
-                module.classifier.weight.data.normal_(mean=0.0, std=factor * 1.0)
-                module.classifier.bias.data.zero_()
-        elif isinstance(module, T5ClassificationHead):
-            module.dense.weight.data.normal_(mean=0.0, std=factor * ((self.config.d_model) ** -0.5))
-            if hasattr(module.dense, "bias") and module.dense.bias is not None:
-                module.dense.bias.data.zero_()
-            module.out_proj.weight.data.normal_(mean=0.0, std=factor * ((self.config.d_model) ** -0.5))
-            if hasattr(module.out_proj, "bias") and module.out_proj.bias is not None:
-                module.out_proj.bias.data.zero_()
-        elif isinstance(module, T5DenseActDense):
-            # Mesh TensorFlow FF initialization
-            # See https://github.com/tensorflow/mesh/blob/master/mesh_tensorflow/transformer/transformer_layers.py#L56
-            # and https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L89
-            module.wi.weight.data.normal_(mean=0.0, std=factor * ((self.config.d_model) ** -0.5))
-            if hasattr(module.wi, "bias") and module.wi.bias is not None:
-                module.wi.bias.data.zero_()
-            module.wo.weight.data.normal_(mean=0.0, std=factor * ((self.config.d_ff) ** -0.5))
-            if hasattr(module.wo, "bias") and module.wo.bias is not None:
-                module.wo.bias.data.zero_()
-        elif isinstance(module, T5DenseGatedActDense):
-            module.wi_0.weight.data.normal_(mean=0.0, std=factor * ((self.config.d_model) ** -0.5))
-            if hasattr(module.wi_0, "bias") and module.wi_0.bias is not None:
-                module.wi_0.bias.data.zero_()
-            module.wi_1.weight.data.normal_(mean=0.0, std=factor * ((self.config.d_model) ** -0.5))
-            if hasattr(module.wi_1, "bias") and module.wi_1.bias is not None:
-                module.wi_1.bias.data.zero_()
-            module.wo.weight.data.normal_(mean=0.0, std=factor * ((self.config.d_ff) ** -0.5))
-            if hasattr(module.wo, "bias") and module.wo.bias is not None:
-                module.wo.bias.data.zero_()
-        elif isinstance(module, T5Attention):
-            # Mesh TensorFlow attention initialization to avoid scaling before softmax
-            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/attention.py#L136
-            d_model = self.config.d_model
-            key_value_proj_dim = self.config.d_kv
-            n_heads = self.config.num_heads
-            module.q.weight.data.normal_(mean=0.0, std=factor * ((d_model * key_value_proj_dim) ** -0.5))
-            module.k.weight.data.normal_(mean=0.0, std=factor * (d_model**-0.5))
-            module.v.weight.data.normal_(mean=0.0, std=factor * (d_model**-0.5))
-            module.o.weight.data.normal_(mean=0.0, std=factor * ((n_heads * key_value_proj_dim) ** -0.5))
-            if module.has_relative_attention_bias:
-                module.relative_attention_bias.weight.data.normal_(mean=0.0, std=factor * ((d_model) ** -0.5))
-
-    def _shift_right(self, input_ids):
-        decoder_start_token_id = self.config.decoder_start_token_id
-        pad_token_id = self.config.pad_token_id
-
-        if decoder_start_token_id is None:
-            raise ValueError(
-                "self.model.config.decoder_start_token_id has to be defined. In T5 it is usually set to the pad_token_id. "
-                "See T5 docs for more information."
-            )
-
-        # shift inputs to the right
-        if is_torch_fx_proxy(input_ids):
-            # Item assignment is not supported natively for proxies.
-            shifted_input_ids = torch.full(input_ids.shape[:-1] + (1,), decoder_start_token_id)
-            shifted_input_ids = torch.cat([shifted_input_ids, input_ids[..., :-1]], dim=-1)
-        else:
-            shifted_input_ids = input_ids.new_zeros(input_ids.shape)
-            shifted_input_ids[..., 1:] = input_ids[..., :-1].clone()
-            shifted_input_ids[..., 0] = decoder_start_token_id
-
-        if pad_token_id is None:
-            raise ValueError("self.model.config.pad_token_id has to be defined.")
-        # replace possible -100 values in labels by `pad_token_id`
-        shifted_input_ids.masked_fill_(shifted_input_ids == -100, pad_token_id)
-
-        return shifted_input_ids
-
-
-class T5Stack(T5PreTrainedModel):
-    def __init__(self, config, embed_tokens=None):
-        super().__init__(config)
-
-        self.embed_tokens = embed_tokens
-        self.is_decoder = config.is_decoder
-
-        self.block = nn.ModuleList(
-            [T5Block(config, has_relative_attention_bias=bool(i == 0), layer_idx=i) for i in range(config.num_layers)]
-        )
-        self.final_layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
-        self.dropout = nn.Dropout(config.dropout_rate)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-        # Model parallel
-        self.model_parallel = False
-        self.device_map = None
-        self.gradient_checkpointing = False
-
-    @add_start_docstrings(PARALLELIZE_DOCSTRING)
-    def parallelize(self, device_map=None):
-        warnings.warn(
-            "`T5Stack.parallelize` is deprecated and will be removed in v5 of Transformers, you should load your model"
-            " with `device_map='balanced'` in the call to `from_pretrained`. You can also provide your own"
-            " `device_map` but it needs to be a dictionary module_name to device, so for instance {'block.0': 0,"
-            " 'block.1': 1, ...}",
-            FutureWarning,
-        )
-        # Check validity of device_map
-        self.device_map = (
-            get_device_map(len(self.block), range(torch.cuda.device_count())) if device_map is None else device_map
-        )
-        assert_device_map(self.device_map, len(self.block))
-        self.model_parallel = True
-        self.first_device = "cpu" if "cpu" in self.device_map else "cuda:" + str(min(self.device_map.keys()))
-        self.last_device = "cuda:" + str(max(self.device_map.keys()))
-        # Load onto devices
-        for k, v in self.device_map.items():
-            for layer in v:
-                cuda_device = "cuda:" + str(k)
-                self.block[layer] = self.block[layer].to(cuda_device)
-
-        # Set embed_tokens to first layer
-        self.embed_tokens = self.embed_tokens.to(self.first_device)
-        # Set final layer norm to last device
-        self.final_layer_norm = self.final_layer_norm.to(self.last_device)
-
-    @add_start_docstrings(DEPARALLELIZE_DOCSTRING)
-    def deparallelize(self):
-        warnings.warn(
-            "Like `parallelize`, `deparallelize` is deprecated and will be removed in v5 of Transformers.",
-            FutureWarning,
-        )
-        self.model_parallel = False
-        self.device_map = None
-        self.first_device = "cpu"
-        self.last_device = "cpu"
-        for i in range(len(self.block)):
-            self.block[i] = self.block[i].to("cpu")
-        self.embed_tokens = self.embed_tokens.to("cpu")
-        self.final_layer_norm = self.final_layer_norm.to("cpu")
-        torch.cuda.empty_cache()
-
-    def set_input_embeddings(self, new_embeddings):
-        self.embed_tokens = new_embeddings
-
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        inputs_embeds=None,
-        head_mask=None,
-        cross_attn_head_mask=None,
-        past_key_values=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        cache_position=None,
-    ):
-        # Model parallel
-        if self.model_parallel:
-            torch.cuda.set_device(self.first_device)
-            self.embed_tokens = self.embed_tokens.to(self.first_device)
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        if input_ids is not None and inputs_embeds is not None:
-            err_msg_prefix = "decoder_" if self.is_decoder else ""
-            raise ValueError(
-                f"You cannot specify both {err_msg_prefix}input_ids and {err_msg_prefix}inputs_embeds at the same time"
-            )
-        elif input_ids is not None:
-            input_shape = input_ids.size()
-            input_ids = input_ids.view(-1, input_shape[-1])
-        elif inputs_embeds is not None:
-            input_shape = inputs_embeds.size()[:-1]
-        else:
-            err_msg_prefix = "decoder_" if self.is_decoder else ""
-            raise ValueError(f"You have to specify either {err_msg_prefix}input_ids or {err_msg_prefix}inputs_embeds")
-
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
-
-        if inputs_embeds is None:
-            if self.embed_tokens is None:
-                raise ValueError("You have to initialize the model with valid token embeddings")
-            inputs_embeds = self.embed_tokens(input_ids)
-
-        batch_size, seq_length = input_shape
-
-        if use_cache is True:
-            if not self.is_decoder:
-                raise ValueError(f"`use_cache` can only be set to `True` if {self} is used as a decoder")
-
-        if self.is_decoder:
-            if use_cache and past_key_values is None:
-                if self.config.is_encoder_decoder:
-                    past_key_values = EncoderDecoderCache(
-                        DynamicCache(config=self.config), DynamicCache(config=self.config)
-                    )
-                else:
-                    past_key_values = DynamicCache(config=self.config)
-        elif not self.is_decoder:
-            # do not pass cache object down the line for encoder stack
-            # it messes indexing later in decoder-stack because cache object is modified in-place
-            past_key_values = None
-
-        past_key_values_length = past_key_values.get_seq_length() if past_key_values is not None else 0
-        if cache_position is None:
-            cache_position = torch.arange(
-                past_key_values_length, past_key_values_length + seq_length, device=inputs_embeds.device
-            )
-
-        if attention_mask is None and not is_torchdynamo_compiling():
-            # required mask seq length can be calculated via length of past cache
-            mask_seq_length = past_key_values_length + seq_length
-            attention_mask = torch.ones(batch_size, mask_seq_length, device=inputs_embeds.device)
-
-        if self.config.is_decoder:
-            causal_mask = self._update_causal_mask(
-                attention_mask,
-                inputs_embeds,
-                cache_position,
-                past_key_values.self_attention_cache
-                if isinstance(past_key_values, EncoderDecoderCache)
-                else past_key_values,
-                output_attentions,
-            )
-        elif attention_mask is not None:
-            causal_mask = attention_mask[:, None, None, :]
-            causal_mask = causal_mask.to(dtype=inputs_embeds.dtype)
-            causal_mask = (1.0 - causal_mask) * torch.finfo(inputs_embeds.dtype).min
-        else:
-            causal_mask = None
-
-        # If a 2D or 3D attention mask is provided for the cross-attention
-        # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
-        if self.is_decoder and encoder_hidden_states is not None:
-            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
-            encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
-            if encoder_attention_mask is None:
-                encoder_attention_mask = torch.ones(
-                    encoder_hidden_shape, device=inputs_embeds.device, dtype=torch.long
-                )
-            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
-        else:
-            encoder_extended_attention_mask = None
-
-        # Prepare head mask if needed
-        head_mask = self.get_head_mask(head_mask, self.config.num_layers)
-        cross_attn_head_mask = self.get_head_mask(cross_attn_head_mask, self.config.num_layers)
-        all_hidden_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-        all_cross_attentions = () if (output_attentions and self.is_decoder) else None
-        position_bias = None
-        encoder_decoder_position_bias = None
-
-        hidden_states = self.dropout(inputs_embeds)
-
-        for i, layer_module in enumerate(self.block):
-            layer_head_mask = head_mask[i]
-            cross_attn_layer_head_mask = cross_attn_head_mask[i]
-            # Model parallel
-            if self.model_parallel:
-                torch.cuda.set_device(hidden_states.device)
-                # Ensure that attention_mask is always on the same device as hidden_states
-                if causal_mask is not None:
-                    causal_mask = causal_mask.to(hidden_states.device)
-                if position_bias is not None:
-                    position_bias = position_bias.to(hidden_states.device)
-                if encoder_hidden_states is not None:
-                    encoder_hidden_states = encoder_hidden_states.to(hidden_states.device)
-                if encoder_extended_attention_mask is not None:
-                    encoder_extended_attention_mask = encoder_extended_attention_mask.to(hidden_states.device)
-                if encoder_decoder_position_bias is not None:
-                    encoder_decoder_position_bias = encoder_decoder_position_bias.to(hidden_states.device)
-                if layer_head_mask is not None:
-                    layer_head_mask = layer_head_mask.to(hidden_states.device)
-                if cross_attn_layer_head_mask is not None:
-                    cross_attn_layer_head_mask = cross_attn_layer_head_mask.to(hidden_states.device)
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
-
-            layer_outputs = layer_module(
-                hidden_states,
-                causal_mask,
-                position_bias,
-                encoder_hidden_states,
-                encoder_extended_attention_mask,
-                encoder_decoder_position_bias,  # as a positional argument for gradient checkpointing
-                layer_head_mask=layer_head_mask,
-                cross_attn_layer_head_mask=cross_attn_layer_head_mask,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                return_dict=return_dict,
-                cache_position=cache_position,
-            )
-
-            hidden_states = layer_outputs[0]
-
-            # We share the position biases between the layers - the first layer store them
-            # layer_outputs = hidden-states, key-value-states (self-attention position bias), (self-attention weights),
-            # (cross-attention position bias), (cross-attention weights)
-            position_bias = layer_outputs[1]
-            if self.is_decoder and encoder_hidden_states is not None:
-                encoder_decoder_position_bias = layer_outputs[3 if output_attentions else 2]
-
-            if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[2],)
-                if self.is_decoder:
-                    all_cross_attentions = all_cross_attentions + (layer_outputs[4],)
-
-            # Model Parallel: If it's the last layer for that device, put things on the next device
-            if self.model_parallel:
-                for k, v in self.device_map.items():
-                    if i == v[-1] and "cuda:" + str(k) != self.last_device:
-                        hidden_states = hidden_states.to("cuda:" + str(k + 1))
-
-        hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-
-        # Add last layer
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
-
-        if not return_dict:
-            return tuple(
-                v
-                for v in [
-                    hidden_states,
-                    past_key_values,
-                    all_hidden_states,
-                    all_attentions,
-                    all_cross_attentions,
-                ]
-                if v is not None
-            )
-        return BaseModelOutputWithPastAndCrossAttentions(
-            last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
-            hidden_states=all_hidden_states,
-            attentions=all_attentions,
-            cross_attentions=all_cross_attentions,
-        )
-
-    # Copied from transformers.models.gptj.modeling_gptj.GPTJModel._update_causal_mask
-    def _update_causal_mask(
-        self,
-        attention_mask: Union[torch.Tensor, "BlockMask"],
-        input_tensor: torch.Tensor,
-        cache_position: torch.Tensor,
-        past_key_values: Cache,
-        output_attentions: bool = False,
-    ):
-        if self.config._attn_implementation == "flash_attention_2":
-            if attention_mask is not None and (attention_mask == 0.0).any():
-                return attention_mask
-            return None
-        if self.config._attn_implementation == "flex_attention":
-            if isinstance(attention_mask, torch.Tensor):
-                attention_mask = make_flex_block_causal_mask(attention_mask)
-            return attention_mask
-
-        # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
-        # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
-        # to infer the attention mask.
-        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-        using_compilable_cache = past_key_values.is_compileable if past_key_values is not None else False
-
-        # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
-        if self.config._attn_implementation == "sdpa" and not using_compilable_cache and not output_attentions:
-            if AttentionMaskConverter._ignore_causal_mask_sdpa(
-                attention_mask,
-                inputs_embeds=input_tensor,
-                past_key_values_length=past_seen_tokens,
-                is_training=self.training,
-            ):
-                return None
-
-        dtype = input_tensor.dtype
-        sequence_length = input_tensor.shape[1]
-        if using_compilable_cache:
-            target_length = past_key_values.get_max_cache_shape()
-        else:
-            target_length = (
-                attention_mask.shape[-1]
-                if isinstance(attention_mask, torch.Tensor)
-                else past_seen_tokens + sequence_length + 1
-            )
-
-        # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
-        causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
-            attention_mask,
-            sequence_length=sequence_length,
-            target_length=target_length,
-            dtype=dtype,
-            cache_position=cache_position,
-            batch_size=input_tensor.shape[0],
-        )
-
-        if (
-            self.config._attn_implementation == "sdpa"
-            and attention_mask is not None
-            and attention_mask.device.type in ["cuda", "xpu", "npu"]
-            and not output_attentions
-        ):
-            # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
-            # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
-            # Details: https://github.com/pytorch/pytorch/issues/110213
-            min_dtype = torch.finfo(dtype).min
-            causal_mask = AttentionMaskConverter._unmask_unattended(causal_mask, min_dtype)
-
-        return causal_mask
-
-    @staticmethod
-    # Copied from transformers.models.gptj.modeling_gptj.GPTJModel._prepare_4d_causal_attention_mask_with_cache_position
-    def _prepare_4d_causal_attention_mask_with_cache_position(
-        attention_mask: torch.Tensor,
-        sequence_length: int,
-        target_length: int,
-        dtype: torch.dtype,
-        cache_position: torch.Tensor,
-        batch_size: int,
-        **kwargs,
-    ):
-        """
-        Creates a causal 4D mask of shape `(batch_size, 1, query_length, key_value_length)` from a 2D mask of shape
-        `(batch_size, key_value_length)`, or if the input `attention_mask` is already 4D, do nothing.
-
-        Args:
-            attention_mask (`torch.Tensor`):
-                A 2D attention mask of shape `(batch_size, key_value_length)` or a 4D attention mask of shape
-                `(batch_size, 1, query_length, key_value_length)`.
-            sequence_length (`int`):
-                The sequence length being processed.
-            target_length (`int`):
-                The target length: when generating with static cache, the mask should be as long as the static cache,
-                to account for the 0 padding, the part of the cache that is not filled yet.
-            dtype (`torch.dtype`):
-                The dtype to use for the 4D attention mask.
-            cache_position (`torch.Tensor`):
-                Indices depicting the position of the input sequence tokens in the sequence.
-            batch_size (`torch.Tensor`):
-                Batch size.
-        """
-        if attention_mask is not None and attention_mask.dim() == 4:
-            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
-            causal_mask = attention_mask
-        else:
-            min_dtype = torch.finfo(dtype).min
-            causal_mask = torch.full(
-                (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=cache_position.device
-            )
-            if sequence_length != 1:
-                causal_mask = torch.triu(causal_mask, diagonal=1)
-            causal_mask *= torch.arange(target_length, device=cache_position.device) > cache_position.reshape(-1, 1)
-            causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
-            if attention_mask is not None:
-                causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
-                mask_length = attention_mask.shape[-1]
-                padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :].to(
-                    causal_mask.device
-                )
-                padding_mask = padding_mask == 0
-                causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
-                    padding_mask, min_dtype
-                )
-
-        return causal_mask
-
-
-# Warning message for FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
-__HEAD_MASK_WARNING_MSG = """
-The input argument `head_mask` was split into two arguments `head_mask` and `decoder_head_mask`. Currently,
-`decoder_head_mask` is set to copy `head_mask`, but this feature is deprecated and will be removed in future versions.
-If you do not want to use any `decoder_head_mask` now, please set `decoder_head_mask = torch.ones(num_layers,
-num_heads)`.
-"""
-
-
-@auto_docstring
-class T5Model(T5PreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = [
-        "decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight",
-    ]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-
-    def __init__(self, config: T5Config):
-        super().__init__(config)
-        self.shared = nn.Embedding(config.vocab_size, config.d_model)
-
-        encoder_config = copy.deepcopy(config)
-        encoder_config.is_decoder = False
-        encoder_config.use_cache = False
-        encoder_config.tie_encoder_decoder = False
-        self.encoder = T5Stack(encoder_config, self.shared)
-
-        decoder_config = copy.deepcopy(config)
-        decoder_config.is_decoder = True
-        decoder_config.tie_encoder_decoder = False
-        decoder_config.num_layers = config.num_decoder_layers
-        self.decoder = T5Stack(decoder_config, self.shared)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-        # Model parallel
-        self.model_parallel = False
-        self.device_map = None
-
-    @add_start_docstrings(PARALLELIZE_DOCSTRING)
-    def parallelize(self, device_map=None):
-        warnings.warn(
-            "`T5Model.parallelize` is deprecated and will be removed in v5 of Transformers, you should load your model"
-            " with `device_map='balanced'` in the call to `from_pretrained`. You can also provide your own"
-            " `device_map` but it needs to be a dictionary module_name to device, so for instance {'encoder.block.0':"
-            " 0, 'encoder.block.1': 1, ...}",
-            FutureWarning,
-        )
-        self.device_map = (
-            get_device_map(len(self.encoder.block), range(torch.cuda.device_count()))
-            if device_map is None
-            else device_map
-        )
-        assert_device_map(self.device_map, len(self.encoder.block))
-        self.encoder.parallelize(self.device_map)
-        self.decoder.parallelize(self.device_map)
-        self.model_parallel = True
-
-    @add_start_docstrings(DEPARALLELIZE_DOCSTRING)
-    def deparallelize(self):
-        warnings.warn(
-            "Like `parallelize`, `deparallelize` is deprecated and will be removed in v5 of Transformers.",
-            FutureWarning,
-        )
-        self.encoder.deparallelize()
-        self.decoder.deparallelize()
-        self.encoder = self.encoder.to("cpu")
-        self.decoder = self.decoder.to("cpu")
-        self.model_parallel = False
-        self.device_map = None
-        torch.cuda.empty_cache()
-
-    def get_input_embeddings(self):
-        return self.shared
-
-    def set_input_embeddings(self, new_embeddings):
-        self.shared = new_embeddings
-        self.encoder.set_input_embeddings(new_embeddings)
-        self.decoder.set_input_embeddings(new_embeddings)
-
-    def _tie_weights(self):
-        if self.config.tie_word_embeddings:
-            self._tie_or_clone_weights(self.encoder.embed_tokens, self.shared)
-            self._tie_or_clone_weights(self.decoder.embed_tokens, self.shared)
-
-    def get_encoder(self):
-        return self.encoder
-
-    def _prune_heads(self, heads_to_prune):
-        """
-        Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base
-        class PreTrainedModel
-        """
-        for layer, heads in heads_to_prune.items():
-            self.encoder.layer[layer].attention.prune_heads(heads)
-
-    @auto_docstring
-    def forward(
-        self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        decoder_input_ids: Optional[torch.LongTensor] = None,
-        decoder_attention_mask: Optional[torch.BoolTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        decoder_head_mask: Optional[torch.FloatTensor] = None,
-        cross_attn_head_mask: Optional[torch.Tensor] = None,
-        encoder_outputs: Optional[tuple[tuple[torch.FloatTensor]]] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        decoder_inputs_embeds: Optional[torch.Tensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Union[tuple[torch.FloatTensor], Seq2SeqModelOutput]:
-        r"""
-        input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. T5 is a model with relative position embeddings so you
-            should be able to pad the inputs on both the right and the left.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for detail.
-
-            [What are input IDs?](../glossary#input-ids)
-
-            To know more on how to prepare `input_ids` for pretraining take a look a [T5 Training](./t5#training).
-        decoder_input_ids (`torch.LongTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
-            Indices of decoder input sequence tokens in the vocabulary.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are decoder input IDs?](../glossary#decoder-input-ids)
-
-            T5 uses the `pad_token_id` as the starting token for `decoder_input_ids` generation. If `past_key_values`
-            is used, optionally only the last `decoder_input_ids` have to be input (see `past_key_values`).
-
-            To know more on how to prepare `decoder_input_ids` for pretraining take a look at [T5
-            Training](./t5#training).
-        decoder_attention_mask (`torch.BoolTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
-            Default behavior: generate a tensor that ignores pad tokens in `decoder_input_ids`. Causal mask will also
-            be used by default.
-        decoder_head_mask (`torch.FloatTensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
-            Mask to nullify selected heads of the self-attention modules in the decoder. Mask values selected in `[0,
-            1]`:
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-        cross_attn_head_mask (`torch.Tensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
-            Mask to nullify selected heads of the cross-attention modules in the decoder. Mask values selected in
-            `[0, 1]`:
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-
-        Example:
-
-        ```python
-        >>> from transformers import AutoTokenizer, T5Model
-
-        >>> tokenizer = AutoTokenizer.from_pretrained("google-t5/t5-small")
-        >>> model = T5Model.from_pretrained("google-t5/t5-small")
-
-        >>> input_ids = tokenizer(
-        ...     "Studies have been shown that owning a dog is good for you", return_tensors="pt"
-        ... ).input_ids  # Batch size 1
-        >>> decoder_input_ids = tokenizer("Studies show that", return_tensors="pt").input_ids  # Batch size 1
-
-        >>> # preprocess: Prepend decoder_input_ids with start token which is pad token for T5Model.
-        >>> # This is not needed for torch's T5ForConditionalGeneration as it does this internally using labels arg.
-        >>> decoder_input_ids = model._shift_right(decoder_input_ids)
-
-        >>> # forward pass
-        >>> outputs = model(input_ids=input_ids, decoder_input_ids=decoder_input_ids)
-        >>> last_hidden_states = outputs.last_hidden_state
-        ```"""
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
-        if head_mask is not None and decoder_head_mask is None:
-            if self.config.num_layers == self.config.num_decoder_layers:
-                warnings.warn(__HEAD_MASK_WARNING_MSG, FutureWarning)
-                decoder_head_mask = head_mask
-
-        # Encode if needed (training, first prediction pass)
-        if encoder_outputs is None:
-            encoder_outputs = self.encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                inputs_embeds=inputs_embeds,
-                head_mask=head_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-        elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=encoder_outputs[0],
-                hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
-                attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
-            )
-
-        hidden_states = encoder_outputs[0]
-
-        # Set device for model parallelism
-        if self.model_parallel:
-            torch.cuda.set_device(self.decoder.first_device)
-            hidden_states = hidden_states.to(self.decoder.first_device)
-            if decoder_input_ids is not None:
-                decoder_input_ids = decoder_input_ids.to(self.decoder.first_device)
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(self.decoder.first_device)
-            if decoder_attention_mask is not None:
-                decoder_attention_mask = decoder_attention_mask.to(self.decoder.first_device)
-
-        # Decode
-        decoder_outputs = self.decoder(
-            input_ids=decoder_input_ids,
-            attention_mask=decoder_attention_mask,
-            inputs_embeds=decoder_inputs_embeds,
-            past_key_values=past_key_values,
-            encoder_hidden_states=hidden_states,
-            encoder_attention_mask=attention_mask,
-            head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            cache_position=cache_position,
-        )
-
-        if not return_dict:
-            return decoder_outputs + encoder_outputs
-
-        return Seq2SeqModelOutput(
-            last_hidden_state=decoder_outputs.last_hidden_state,
-            past_key_values=decoder_outputs.past_key_values,
-            decoder_hidden_states=decoder_outputs.hidden_states,
-            decoder_attentions=decoder_outputs.attentions,
-            cross_attentions=decoder_outputs.cross_attentions,
-            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
-            encoder_hidden_states=encoder_outputs.hidden_states,
-            encoder_attentions=encoder_outputs.attentions,
-        )
-
-
-@auto_docstring(
-    custom_intro="""
-    T5 Model with a `language modeling` head on top.
-    """
-)
-class T5ForConditionalGeneration(T5PreTrainedModel, GenerationMixin):
-    _keys_to_ignore_on_load_unexpected = [
-        "decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight",
-    ]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight", "lm_head.weight"]
-
-    def __init__(self, config: T5Config):
-        super().__init__(config)
-        self.model_dim = config.d_model
-
-        self.shared = nn.Embedding(config.vocab_size, config.d_model)
-
-        encoder_config = copy.deepcopy(config)
-        encoder_config.is_decoder = False
-        encoder_config.use_cache = False
-        encoder_config.tie_encoder_decoder = False
-        self.encoder = T5Stack(encoder_config, self.shared)
-
-        decoder_config = copy.deepcopy(config)
-        decoder_config.is_decoder = True
-        decoder_config.tie_encoder_decoder = False
-        decoder_config.num_layers = config.num_decoder_layers
-        self.decoder = T5Stack(decoder_config, self.shared)
-
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-        # Model parallel
-        self.model_parallel = False
-        self.device_map = None
-
-    @add_start_docstrings(PARALLELIZE_DOCSTRING)
-    def parallelize(self, device_map=None):
-        warnings.warn(
-            "`T5ForConditionalGeneration.parallelize` is deprecated and will be removed in v5 of Transformers, you"
-            " should load your model with `device_map='balanced'` in the call to `from_pretrained`. You can also"
-            " provide your own `device_map` but it needs to be a dictionary module_name to device, so for instance"
-            " {'encoder.block.0': 0, 'encoder.block.1': 1, ...}",
-            FutureWarning,
-        )
-        self.device_map = (
-            get_device_map(len(self.encoder.block), range(torch.cuda.device_count()))
-            if device_map is None
-            else device_map
-        )
-        assert_device_map(self.device_map, len(self.encoder.block))
-        self.encoder.parallelize(self.device_map)
-        self.decoder.parallelize(self.device_map)
-        self.lm_head = self.lm_head.to(self.decoder.first_device)
-        self.model_parallel = True
-
-    @add_start_docstrings(DEPARALLELIZE_DOCSTRING)
-    def deparallelize(self):
-        warnings.warn(
-            "Like `parallelize`, `deparallelize` is deprecated and will be removed in v5 of Transformers.",
-            FutureWarning,
-        )
-        self.encoder.deparallelize()
-        self.decoder.deparallelize()
-        self.encoder = self.encoder.to("cpu")
-        self.decoder = self.decoder.to("cpu")
-        self.lm_head = self.lm_head.to("cpu")
-        self.model_parallel = False
-        self.device_map = None
-        torch.cuda.empty_cache()
-
-    def get_input_embeddings(self):
-        return self.shared
-
-    def set_input_embeddings(self, new_embeddings):
-        self.shared = new_embeddings
-        self.encoder.set_input_embeddings(new_embeddings)
-        self.decoder.set_input_embeddings(new_embeddings)
-
-    def _tie_weights(self):
-        if self.config.tie_word_embeddings:
-            self._tie_or_clone_weights(self.encoder.embed_tokens, self.shared)
-            self._tie_or_clone_weights(self.decoder.embed_tokens, self.shared)
-
-    def get_encoder(self):
-        return self.encoder
-
-    @auto_docstring
-    def forward(
-        self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        decoder_input_ids: Optional[torch.LongTensor] = None,
-        decoder_attention_mask: Optional[torch.BoolTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        decoder_head_mask: Optional[torch.FloatTensor] = None,
-        cross_attn_head_mask: Optional[torch.Tensor] = None,
-        encoder_outputs: Optional[tuple[tuple[torch.Tensor]]] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Union[tuple[torch.FloatTensor], Seq2SeqLMOutput]:
-        r"""
-        input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. T5 is a model with relative position embeddings so you
-            should be able to pad the inputs on both the right and the left.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for detail.
-
-            [What are input IDs?](../glossary#input-ids)
-
-            To know more on how to prepare `input_ids` for pretraining take a look a [T5 Training](./t5#training).
-        decoder_input_ids (`torch.LongTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
-            Indices of decoder input sequence tokens in the vocabulary.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are decoder input IDs?](../glossary#decoder-input-ids)
-
-            T5 uses the `pad_token_id` as the starting token for `decoder_input_ids` generation. If `past_key_values`
-            is used, optionally only the last `decoder_input_ids` have to be input (see `past_key_values`).
-
-            To know more on how to prepare `decoder_input_ids` for pretraining take a look at [T5
-            Training](./t5#training).
-        decoder_attention_mask (`torch.BoolTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
-            Default behavior: generate a tensor that ignores pad tokens in `decoder_input_ids`. Causal mask will also
-            be used by default.
-        decoder_head_mask (`torch.FloatTensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
-            Mask to nullify selected heads of the self-attention modules in the decoder. Mask values selected in `[0,
-            1]`:
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-        cross_attn_head_mask (`torch.Tensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
-            Mask to nullify selected heads of the cross-attention modules in the decoder. Mask values selected in
-            `[0, 1]`:
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            Labels for computing the sequence classification/regression loss. Indices should be in `[-100, 0, ...,
-            config.vocab_size - 1]`. All labels set to `-100` are ignored (masked), the loss is only computed for
-            labels in `[0, ..., config.vocab_size]`
-
-        Examples:
-
-        ```python
-        >>> from transformers import AutoTokenizer, T5ForConditionalGeneration
-
-        >>> tokenizer = AutoTokenizer.from_pretrained("google-t5/t5-small")
-        >>> model = T5ForConditionalGeneration.from_pretrained("google-t5/t5-small")
-
-        >>> # training
-        >>> input_ids = tokenizer("The <extra_id_0> walks in <extra_id_1> park", return_tensors="pt").input_ids
-        >>> labels = tokenizer("<extra_id_0> cute dog <extra_id_1> the <extra_id_2>", return_tensors="pt").input_ids
-        >>> outputs = model(input_ids=input_ids, labels=labels)
-        >>> loss = outputs.loss
-        >>> logits = outputs.logits
-
-        >>> # inference
-        >>> input_ids = tokenizer(
-        ...     "summarize: studies have shown that owning a dog is good for you", return_tensors="pt"
-        ... ).input_ids  # Batch size 1
-        >>> outputs = model.generate(input_ids)
-        >>> print(tokenizer.decode(outputs[0], skip_special_tokens=True))
-        >>> # studies have shown that owning a dog is good for you.
-        ```"""
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
-        if head_mask is not None and decoder_head_mask is None:
-            if self.config.num_layers == self.config.num_decoder_layers:
-                warnings.warn(__HEAD_MASK_WARNING_MSG, FutureWarning)
-                decoder_head_mask = head_mask
-
-        # Encode if needed (training, first prediction pass)
-        if encoder_outputs is None:
-            # Convert encoder inputs in embeddings if needed
-            encoder_outputs = self.encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                inputs_embeds=inputs_embeds,
-                head_mask=head_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-        elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=encoder_outputs[0],
-                hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
-                attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
-            )
-
-        hidden_states = encoder_outputs[0]
-
-        if self.model_parallel:
-            torch.cuda.set_device(self.decoder.first_device)
-
-        if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
-            # get decoder inputs from shifting lm labels to the right
-            decoder_input_ids = self._shift_right(labels)
-
-        # Set device for model parallelism
-        if self.model_parallel:
-            torch.cuda.set_device(self.decoder.first_device)
-            hidden_states = hidden_states.to(self.decoder.first_device)
-            if decoder_input_ids is not None:
-                decoder_input_ids = decoder_input_ids.to(self.decoder.first_device)
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(self.decoder.first_device)
-            if decoder_attention_mask is not None:
-                decoder_attention_mask = decoder_attention_mask.to(self.decoder.first_device)
-
-        # Decode
-        decoder_outputs = self.decoder(
-            input_ids=decoder_input_ids,
-            attention_mask=decoder_attention_mask,
-            inputs_embeds=decoder_inputs_embeds,
-            past_key_values=past_key_values,
-            encoder_hidden_states=hidden_states,
-            encoder_attention_mask=attention_mask,
-            head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            cache_position=cache_position,
-        )
-
-        sequence_output = decoder_outputs[0]
-
-        # Set device for model parallelism
-        if self.model_parallel:
-            torch.cuda.set_device(self.encoder.first_device)
-            self.lm_head = self.lm_head.to(self.encoder.first_device)
-            sequence_output = sequence_output.to(self.lm_head.weight.device)
-
-        if self.config.tie_word_embeddings:
-            # Rescale output before projecting on vocab
-            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
-            sequence_output = sequence_output * (self.model_dim**-0.5)
-
-        lm_logits = self.lm_head(sequence_output)
-
-        loss = None
-        if labels is not None:
-            loss_fct = CrossEntropyLoss(ignore_index=-100)
-            # move labels to correct device to enable PP
-            labels = labels.to(lm_logits.device)
-            loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
-            # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
-
-        if not return_dict:
-            output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
-            return ((loss,) + output) if loss is not None else output
-
-        return Seq2SeqLMOutput(
-            loss=loss,
-            logits=lm_logits,
-            past_key_values=decoder_outputs.past_key_values,
-            decoder_hidden_states=decoder_outputs.hidden_states,
-            decoder_attentions=decoder_outputs.attentions,
-            cross_attentions=decoder_outputs.cross_attentions,
-            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
-            encoder_hidden_states=encoder_outputs.hidden_states,
-            encoder_attentions=encoder_outputs.attentions,
-        )
-
-    def prepare_decoder_input_ids_from_labels(self, labels: torch.Tensor):
-        return self._shift_right(labels)
-
-
-@auto_docstring
-class T5EncoderModel(T5PreTrainedModel):
-    _tied_weights_keys = ["encoder.embed_tokens.weight"]
-    _keys_to_ignore_on_load_unexpected = [r"decoder"]
-
-    def __init__(self, config: T5Config):
-        super().__init__(config)
-        self.shared = nn.Embedding(config.vocab_size, config.d_model)
-
-        encoder_config = config
-        encoder_config.use_cache = False
-        encoder_config.is_encoder_decoder = False
-        self.encoder = T5Stack(encoder_config, self.shared)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-        # Model parallel
-        self.model_parallel = False
-        self.device_map = None
-
-    @add_start_docstrings(PARALLELIZE_DOCSTRING)
-    def parallelize(self, device_map=None):
-        warnings.warn(
-            "`T5EncoderModel.parallelize` is deprecated and will be removed in v5 of Transformers, you should load"
-            " your model with `device_map='balanced'` in the call to `from_pretrained`. You can also provide your own"
-            " `device_map` but it needs to be a dictionary module_name to device, so for instance {'block.0': 0,"
-            " 'block.1': 1, ...}",
-            FutureWarning,
-        )
-        self.device_map = (
-            get_device_map(len(self.encoder.block), range(torch.cuda.device_count()))
-            if device_map is None
-            else device_map
-        )
-        assert_device_map(self.device_map, len(self.encoder.block))
-        self.encoder.parallelize(self.device_map)
-        self.model_parallel = True
-
-    @add_start_docstrings(DEPARALLELIZE_DOCSTRING)
-    def deparallelize(self):
-        warnings.warn(
-            "Like `parallelize`, `deparallelize` is deprecated and will be removed in v5 of Transformers.",
-            FutureWarning,
-        )
-        self.encoder.deparallelize()
-        self.encoder = self.encoder.to("cpu")
-        self.model_parallel = False
-        self.device_map = None
-        torch.cuda.empty_cache()
-
-    def get_input_embeddings(self):
-        return self.shared
-
-    def set_input_embeddings(self, new_embeddings):
-        self.shared = new_embeddings
-        self.encoder.set_input_embeddings(new_embeddings)
-
-    def _tie_weights(self):
-        if self.config.tie_word_embeddings:
-            self._tie_or_clone_weights(self.encoder.embed_tokens, self.shared)
-
-    def get_encoder(self):
-        return self.encoder
-
-    def _prune_heads(self, heads_to_prune):
-        """
-        Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base
-        class PreTrainedModel
-        """
-        for layer, heads in heads_to_prune.items():
-            self.encoder.block[layer].layer[0].SelfAttention.prune_heads(heads)
-
-    @auto_docstring
-    def forward(
-        self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[tuple[torch.FloatTensor], BaseModelOutput]:
-        r"""
-        input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. T5 is a model with relative position embeddings so you
-            should be able to pad the inputs on both the right and the left.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for detail.
-
-            To know more on how to prepare `input_ids` for pretraining take a look a [T5 Training](./t5#training).
-
-        Example:
-
-        ```python
-        >>> from transformers import AutoTokenizer, T5EncoderModel
-
-        >>> tokenizer = AutoTokenizer.from_pretrained("google-t5/t5-small")
-        >>> model = T5EncoderModel.from_pretrained("google-t5/t5-small")
-        >>> input_ids = tokenizer(
-        ...     "Studies have been shown that owning a dog is good for you", return_tensors="pt"
-        ... ).input_ids  # Batch size 1
-        >>> outputs = model(input_ids=input_ids)
-        >>> last_hidden_states = outputs.last_hidden_state
-        ```"""
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        encoder_outputs = self.encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            head_mask=head_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-        return encoder_outputs
-
-
-@auto_docstring(
-    custom_intro="""
-    T5 model with a sequence classification/head on top (a linear layer on top of the pooled output) e.g. for GLUE
-    tasks.
-    """
-)
-class T5ForSequenceClassification(T5PreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-
-    def __init__(self, config: T5Config):
-        super().__init__(config)
-        self.transformer = T5Model(config)
-        self.classification_head = T5ClassificationHead(config)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-        self.model_parallel = False
-
-    @auto_docstring
-    def forward(
-        self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        decoder_input_ids: Optional[torch.LongTensor] = None,
-        decoder_attention_mask: Optional[torch.LongTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        decoder_head_mask: Optional[torch.Tensor] = None,
-        cross_attn_head_mask: Optional[torch.Tensor] = None,
-        encoder_outputs: Optional[list[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[tuple, Seq2SeqSequenceClassifierOutput]:
-        r"""
-        input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. T5 is a model with relative position embeddings so you
-            should be able to pad the inputs on both the right and the left.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for detail.
-
-            [What are input IDs?](../glossary#input-ids)
-
-            To know more on how to prepare `input_ids` for pretraining take a look a [T5 Training](./t5#training).
-        decoder_input_ids (`torch.LongTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
-            Indices of decoder input sequence tokens in the vocabulary.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are decoder input IDs?](../glossary#decoder-input-ids)
-
-            T5 uses the `pad_token_id` as the starting token for `decoder_input_ids` generation. If `past_key_values`
-            is used, optionally only the last `decoder_input_ids` have to be input (see `past_key_values`).
-
-            To know more on how to prepare `decoder_input_ids` for pretraining take a look at [T5
-            Training](./t5#training).
-        decoder_attention_mask (`torch.BoolTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
-            Default behavior: generate a tensor that ignores pad tokens in `decoder_input_ids`. Causal mask will also
-            be used by default.
-        decoder_head_mask (`torch.FloatTensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
-            Mask to nullify selected heads of the self-attention modules in the decoder. Mask values selected in `[0,
-            1]`:
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-        cross_attn_head_mask (`torch.Tensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
-            Mask to nullify selected heads of the cross-attention modules in the decoder. Mask values selected in
-            `[0, 1]`:
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
-            config.num_labels - 1]`. If `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
-        """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        if labels is not None:
-            use_cache = False
-
-        if input_ids is None and inputs_embeds is not None:
-            raise NotImplementedError(
-                f"Passing input embeddings is currently not supported for {self.__class__.__name__}"
-            )
-
-        # Copied from models.bart.modeling_bart.BartModel.forward different to other models, T5 automatically creates
-        # decoder_input_ids from input_ids if no decoder_input_ids are provided
-        if decoder_input_ids is None and decoder_inputs_embeds is None:
-            if input_ids is None:
-                raise ValueError(
-                    "If no `decoder_input_ids` or `decoder_inputs_embeds` are "
-                    "passed, `input_ids` cannot be `None`. Please pass either "
-                    "`input_ids` or `decoder_input_ids` or `decoder_inputs_embeds`."
-                )
-            decoder_input_ids = self._shift_right(input_ids)
-
-        outputs = self.transformer(
-            input_ids,
-            attention_mask=attention_mask,
-            decoder_input_ids=decoder_input_ids,
-            decoder_attention_mask=decoder_attention_mask,
-            head_mask=head_mask,
-            decoder_head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            encoder_outputs=encoder_outputs,
-            inputs_embeds=inputs_embeds,
-            decoder_inputs_embeds=decoder_inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        sequence_output = outputs[0]
-
-        eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
-
-        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
-            raise ValueError("All examples must have the same number of <eos> tokens.")
-        batch_size, _, hidden_size = sequence_output.shape
-        sentence_representation = sequence_output[eos_mask, :].view(batch_size, -1, hidden_size)[:, -1, :]
-        logits = self.classification_head(sentence_representation)
-
-        loss = None
-        if labels is not None:
-            labels = labels.to(logits.device)
-            if self.config.problem_type is None:
-                if self.config.num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.config.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
-
-            if self.config.problem_type == "regression":
-                loss_fct = MSELoss()
-                if self.config.num_labels == 1:
-                    loss = loss_fct(logits.squeeze(), labels.squeeze())
-                else:
-                    loss = loss_fct(logits, labels)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.config.num_labels), labels.view(-1))
-            elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
-                loss = loss_fct(logits, labels)
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return ((loss,) + output) if loss is not None else output
-
-        return Seq2SeqSequenceClassifierOutput(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            decoder_hidden_states=outputs.decoder_hidden_states,
-            decoder_attentions=outputs.decoder_attentions,
-            cross_attentions=outputs.cross_attentions,
-            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
-            encoder_hidden_states=outputs.encoder_hidden_states,
-            encoder_attentions=outputs.encoder_attentions,
-        )
-
-
-@auto_docstring
-class T5ForTokenClassification(T5PreTrainedModel):
-    _tied_weights_keys = ["transformer.encoder.embed_tokens.weight"]
-
-    def __init__(self, config: T5Config):
-        super().__init__(config)
-        self.num_labels = config.num_labels
-
-        self.transformer = T5EncoderModel(config)
-        self.dropout = nn.Dropout(config.classifier_dropout)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    @auto_docstring
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[tuple[torch.Tensor], TokenClassifierOutput]:
-        r"""
-        input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. T5 is a model with relative position embeddings so you
-            should be able to pad the inputs on both the right and the left.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for detail.
-
-            [What are input IDs?](../glossary#input-ids)
-
-            To know more on how to prepare `input_ids` for pretraining take a look a [T5 Training](./t5#training).
-        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Labels for computing the token classification loss. Indices should be in `[0, ..., config.num_labels - 1]`.
-        """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        outputs = self.transformer(
-            input_ids,
-            attention_mask=attention_mask,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-        hidden_states = outputs[0]
-        hidden_states = self.dropout(hidden_states)
-        logits = self.classifier(hidden_states)
-
-        loss = None
-        if labels is not None:
-            loss_fct = CrossEntropyLoss()
-            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-
-        if not return_dict:
-            output = (logits, outputs[2:-1])
-            return ((loss,) + output) if loss is not None else output
-
-        return TokenClassifierOutput(
-            loss=loss,
-            logits=logits,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
-
-
-@auto_docstring
-class T5ForQuestionAnswering(T5PreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = ["decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"]
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-
-    def __init__(self, config: T5Config):
-        super().__init__(config)
-        self.model_dim = config.d_model
-
-        self.shared = nn.Embedding(config.vocab_size, config.d_model)
-
-        encoder_config = copy.deepcopy(config)
-        encoder_config.is_decoder = False
-        encoder_config.use_cache = False
-        encoder_config.tie_encoder_decoder = False
-        self.encoder = T5Stack(encoder_config, self.shared)
-
-        decoder_config = copy.deepcopy(config)
-        decoder_config.is_decoder = True
-        decoder_config.tie_encoder_decoder = False
-        decoder_config.num_layers = config.num_decoder_layers
-        self.decoder = T5Stack(decoder_config, self.shared)
-
-        self.num_labels = config.num_labels
-        self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-        self.model_parallel = False
-
-    def get_input_embeddings(self):
-        return self.shared
-
-    def set_input_embeddings(self, new_embeddings):
-        self.shared = new_embeddings
-        self.encoder.set_input_embeddings(new_embeddings)
-        self.decoder.set_input_embeddings(new_embeddings)
-
-    def _tie_weights(self):
-        if self.config.tie_word_embeddings:
-            self._tie_or_clone_weights(self.encoder.embed_tokens, self.shared)
-            self._tie_or_clone_weights(self.decoder.embed_tokens, self.shared)
-
-    def get_encoder(self):
-        return self.encoder
-
-    @auto_docstring
-    def forward(
-        self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        decoder_input_ids: Optional[torch.LongTensor] = None,
-        decoder_attention_mask: Optional[torch.BoolTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        decoder_head_mask: Optional[torch.FloatTensor] = None,
-        cross_attn_head_mask: Optional[torch.Tensor] = None,
-        encoder_outputs: Optional[tuple[tuple[torch.Tensor]]] = None,
-        start_positions: Optional[torch.LongTensor] = None,
-        end_positions: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[tuple[torch.FloatTensor], Seq2SeqQuestionAnsweringModelOutput]:
-        r"""
-        input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. T5 is a model with relative position embeddings so you
-            should be able to pad the inputs on both the right and the left.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for detail.
-
-            [What are input IDs?](../glossary#input-ids)
-
-            To know more on how to prepare `input_ids` for pretraining take a look a [T5 Training](./t5#training).
-        decoder_input_ids (`torch.LongTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
-            Indices of decoder input sequence tokens in the vocabulary.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are decoder input IDs?](../glossary#decoder-input-ids)
-
-            T5 uses the `pad_token_id` as the starting token for `decoder_input_ids` generation. If `past_key_values`
-            is used, optionally only the last `decoder_input_ids` have to be input (see `past_key_values`).
-
-            To know more on how to prepare `decoder_input_ids` for pretraining take a look at [T5
-            Training](./t5#training).
-        decoder_attention_mask (`torch.BoolTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
-            Default behavior: generate a tensor that ignores pad tokens in `decoder_input_ids`. Causal mask will also
-            be used by default.
-        decoder_head_mask (`torch.FloatTensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
-            Mask to nullify selected heads of the self-attention modules in the decoder. Mask values selected in `[0,
-            1]`:
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-        cross_attn_head_mask (`torch.Tensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
-            Mask to nullify selected heads of the cross-attention modules in the decoder. Mask values selected in
-            `[0, 1]`:
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-        """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        if start_positions is not None and end_positions is not None:
-            use_cache = False
-
-        # Copied from models.bart.modeling_bart.BartModel.forward
-        #   different to other models, T5 automatically creates decoder_input_ids from
-        #   input_ids if no decoder_input_ids are provided
-        if decoder_input_ids is None and decoder_inputs_embeds is None:
-            if input_ids is None:
-                raise ValueError(
-                    "If no `decoder_input_ids` or `decoder_inputs_embeds` are "
-                    "passed, `input_ids` cannot be `None`. Please pass either "
-                    "`input_ids` or `decoder_input_ids` or `decoder_inputs_embeds`."
-                )
-            decoder_input_ids = self._shift_right(input_ids)
-
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
-        if head_mask is not None and decoder_head_mask is None:
-            if self.config.num_layers == self.config.num_decoder_layers:
-                warnings.warn(__HEAD_MASK_WARNING_MSG, FutureWarning)
-                decoder_head_mask = head_mask
-
-        # Encode if needed (training, first prediction pass)
-        if encoder_outputs is None:
-            encoder_outputs = self.encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                inputs_embeds=inputs_embeds,
-                head_mask=head_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-        elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
-            encoder_outputs = BaseModelOutput(
-                last_hidden_state=encoder_outputs[0],
-                hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
-                attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
-            )
-
-        hidden_states = encoder_outputs[0]
-
-        # Decode
-        decoder_outputs = self.decoder(
-            input_ids=decoder_input_ids,
-            attention_mask=decoder_attention_mask,
-            inputs_embeds=decoder_inputs_embeds,
-            past_key_values=None,
-            encoder_hidden_states=hidden_states,
-            encoder_attention_mask=attention_mask,
-            head_mask=decoder_head_mask,
-            cross_attn_head_mask=cross_attn_head_mask,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-
-        sequence_output = decoder_outputs[0]
-
-        logits = self.qa_outputs(sequence_output)
-        start_logits, end_logits = logits.split(1, dim=-1)
-        start_logits = start_logits.squeeze(-1).contiguous()
-        end_logits = end_logits.squeeze(-1).contiguous()
-
-        total_loss = None
-        if start_positions is not None and end_positions is not None:
-            # If we are on multi-GPU, split add a dimension
-            if len(start_positions.size()) > 1:
-                start_positions = start_positions.squeeze(-1).to(start_logits.device)
-            if len(end_positions.size()) > 1:
-                end_positions = end_positions.squeeze(-1).to(end_logits.device)
-            # sometimes the start/end positions are outside our model inputs, we ignore these terms
-            ignored_index = start_logits.size(1)
-            start_positions = start_positions.clamp(0, ignored_index)
-            end_positions = end_positions.clamp(0, ignored_index)
-
-            loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
-            start_loss = loss_fct(start_logits, start_positions)
-            end_loss = loss_fct(end_logits, end_positions)
-            total_loss = (start_loss + end_loss) / 2
-
-        if not return_dict:
-            output = (start_logits, end_logits) + decoder_outputs[1:] + encoder_outputs
-            return ((total_loss,) + output) if total_loss is not None else output
-
-        return Seq2SeqQuestionAnsweringModelOutput(
-            loss=total_loss,
-            start_logits=start_logits,
-            end_logits=end_logits,
-            past_key_values=decoder_outputs.past_key_values,
-            decoder_hidden_states=decoder_outputs.hidden_states,
-            decoder_attentions=decoder_outputs.attentions,
-            cross_attentions=decoder_outputs.cross_attentions,
-            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
-            encoder_hidden_states=encoder_outputs.hidden_states,
-            encoder_attentions=encoder_outputs.attentions,
-        )
-
-
-__all__ = [
-    "T5EncoderModel",
-    "T5ForConditionalGeneration",
-    "T5Model",
-    "T5PreTrainedModel",
-    "load_tf_weights_in_t5",
-    "T5ForQuestionAnswering",
-    "T5ForSequenceClassification",
-    "T5ForTokenClassification",
-]
- •iÑ Ô Ñ!Ô!€DàyŠy‰{Œ{€HØyŠy‰{Œ{€Hå˜Ÿš™œ¨×);Ò);Ñ)=Ô)=Ñ>Ô>ğ ğ ‰ˆˆSØˆˆS‰	Øˆ‰Øˆ‰ˆà5Ğ5˜xĞ5Ñ5Ô5€HØ5Ğ5˜xĞ5Ñ5Ô5€Hå˜ (Ñ+Ô+ğ ğ ‰ˆˆSØˆˆS‰	ˆ	à4Š4˜T¨$ˆ4Ñ/Ô/Ğ/r   z
-aten::fillc                ó„   — t           j                             |t           j        j        ¦  «        }t	          | |||¦  «        S r  )r	   rw  rx  r{  rW   )r)  r>  rf  r~  s       r  rQ   rQ     s=   € õ Ô+×6Ò6ØkÔ'Ô-ñô €Kõ Q˜˜e [Ñ1Ô1Ğ1r   zaten::index_addc           
-     ó´  ‡— t          j        d¦  «         |r@t          j        t          j        |¦  «        ¦  «        dk    rt          j        dd|¦  «        S t          j        ‰d¦  «        Š‰€t          j        d|¦  «        ‚t          j	        |¦  «        }t          j	        |¦  «        }||€t          j        d|¦  «        ‚||k    r@||z
-  }t          |¦  «        D ]+}	t          j        | |t          j	        |¦  «        g¦  «        }Œ,t          j        |‰¦  «        }
-t          j        |‰¦  «        }|
-||
-|k    rt          j        d|¦  «        ‚t          t          |¦  «        ¦  «        }d	„ t          |¦  «        D ¦   «         }ˆfd
-„t          |¦  «        D ¦   «         }t          j        | ||||¬¦  «        }t          | ||¦  «        }t          ‰¦  «        D ]}	t          j        | |dg¦  «        }Œt          |‰z
-  dz
-  ¦  «        D ]+}	t          j        | |t          j	        |¦  «        g¦  «        }Œ,t!          | |‰t          | ||¦  «        |¦  «        S )NzyWarning: ONNX export does not support duplicated values in 'index' field, this will cause the ONNX model to be incorrect.rF  re   z
-alpha != 1r˜  zXONNX export does NOT support exporting 'index_add_()' function with unknown 'dim' value.z~ONNX export does NOT support exporting 'index_add_()' function while the rank of self tensor or tensor to be added is unknown.zoONNX export does not support exporting 'index_add_()' function with duplicated values in 'index' parameter yet.c                ó   — g | ]}d ‘ŒS rı  r!  r¼  s     r  r­  zindex_add.<locals>.<listcomp>É  s   € Ğ8Ğ8Ğ8˜a˜Ğ8Ğ8Ğ8r   c                ó8   •— g | ]}|‰k    rt           j        nd ‘ŒS rÅ  )ÚsysÚmaxsize)r  r˜  rB   s     €r  r­  zindex_add.<locals>.<listcomp>Ê  s'   ø€ ĞUĞUĞU¸1 a¨3¢h h•c”kk°QĞUĞUĞUr   rx  r   )rC  rD  r   rK  rL  rb  r1  r
-   rm  rœ  r)  r¬  r¢  r8  rz  rN   rİ   )r)  r>  rB   rj   rB  rN  Úself_dim_rankÚother_dim_rankÚdeltar˜  Úother_dim_sizeÚself_dim_sizeÚnew_shape_axesÚnew_shape_startsÚnew_shape_endsr6  s     `             r  re   re   –  s±  ø€ å„Mğ	<ñô ğ ğ ğ O•Ô(­Ô)JÈ5Ñ)QÔ)QÑRÔRĞVWÒWĞWİÔ-¨k¸<ÈÑNÔNĞNå
-Ô
-*¨3°Ñ
-4Ô
-4€CØ
-€{İÔ'ğ#àñ
-ô 
-ğ 	
-õ $Ô4°TÑ:Ô:€Mİ$Ô5°eÑ<Ô<€NàĞ Ğ 6İÔ'ğHàñ
-ô 
-ğ 	
-ğ ˜Ò&Ğ&Ø Ñ.ˆİu‘”ğ 	ğ 	ˆAİ#Ô5Ø5?Ô;¸EÑBÔBĞCñô ˆEˆEõ %Ô9¸%ÀÑEÔE€Nİ#Ô8¸¸sÑCÔC€MàĞ"¨Ğ)BØ˜MÒ)Ğ)İÔ+ğ>àñô ğ õ % Ñ.Ô.Ñ/Ô/€NØ8Ğ8¥5¨Ñ#7Ô#7Ğ8Ñ8Ô8ĞØUĞUĞUĞUÅÀmÑ@TÔ@TĞUÑUÔU€NåÔ-Ø	ˆ4nĞ-=ÀNğñ ô €Iõ a˜ 	Ñ*Ô*€Eå3‰ZŒZğ Ağ AˆİÔ1°!°U¸Q¸CÑ@Ô@ˆˆå= 3Ñ&¨Ñ*Ñ+Ô+ğ 
-ğ 
-ˆİÔ1Øˆu•Ô7¸Ñ>Ô>Ğ?ñ
-ô 
-ˆˆõ q˜$ ¥Y¨q°%¸Ñ%?Ô%?ÀÑGÔGĞGr   z
-aten::rollc           	     óÊ  — t          |¦  «        t          |¦  «        k    sJ ‚|}t          t          |¦  «        ¦  «        D ]¡}g }t          j        | |||         g||          gt          j        g¬¦  «        }|                     |¦  «         t          j        | |||         gdg||          g¬¦  «        }|                     |¦  «          | j        dg|¢R d||         i}Œ¢|S )Nrx  r   r5  r6  )rX  r)  r   rz  rÆ  rÇ  r  r%  )r)  r>  Úshiftsr=  rø  r˜  r¸  r9  s           r  rØ   rØ   Ü  s  € õ ˆv‰;Œ;#˜d™)œ)Ò#Ğ#Ğ#Ğ#à€Fİ•3v‘;”;ÑÔğ 
-9ğ 
-9ˆØˆİÔ-Øˆv˜T !œW˜I°°q´	¨z¨lÅ#Ä+Àğ
-ñ 
-ô 
-ˆğ 	ŠeÑÔĞİÔ-Øˆv˜T !œW˜I¨q¨c¸&À¼)¸¸ğ
-ñ 
-ô 
-ˆğ 	ŠeÑÔĞØ”hĞ8 Ğ8Ğ8Ğ8°°Q´Ğ8Ğ8ˆˆà€Mr   zaten::crossc           	     ó*  — t          j        ||¦  «        }t          | |dg|g¦  «        }t          | |dg|g¦  «        }t          | |dg|g¦  «        }t          | |dg|g¦  «        }t          | t	          | ||¦  «        t	          | ||¦  «        ¦  «        S )NrÃ  rF  )r   Ú_get_dim_for_crossrØ   ró   rš   )r)  r1  rB  rB   Úroll_x_1Úroll_y_1Úroll_x_2Úroll_y_2s           r  r?   r?   ñ  s¢   € õ Ô
-,¨U°CÑ
-8Ô
-8€Cõ
- Au˜q˜c C 5Ñ)Ô)€HİAu˜q˜c C 5Ñ)Ô)€Hõ Au˜q˜c C 5Ñ)Ô)€HİAu˜q˜c C 5Ñ)Ô)€Hõ ˆq•#a˜ 8Ñ,Ô,­c°!°X¸xÑ.HÔ.HÑIÔIĞIr   zaten::cdistrğ  Ú#use_mm_for_euclid_dist_if_necessaryc                óÒ  — t          j        |d¦  «        }t          j        |d¦  «        }|€J ‚|€J ‚t          j        |d¦  «        }t          j        |d¦  «        }|dk    r%|dk    s|€|dk    r|dk    rt          | ||¦  «        S t          j        |¦  «        }|€J ‚t          j        | ||dz
-  g¦  «        }	t          j        | ||dz
-  g¦  «        }
-t          | |	|
-|dd	¬
-¦  «        S )Nr  r\  r˜  rğ  rF  é   rÃ  gíµ ÷Æ°>F)ræ  r8  )r   r¢  r  Ú_euclidean_distrœ  r¬  r¯   )r)  r@  rA  rH  Úcompute_modeÚrow_size_x1Úrow_size_x2Úp_floatr%  Úbroadcasted_x1Úbroadcasted_x2s              r  r,   r,     s  € õ "Ô6°r¸2Ñ>Ô>€Kİ!Ô6°r¸2Ñ>Ô>€KØĞ"Ğ"Ğ"ØĞ"Ğ"Ğ"İÔ(¨¨CÑ0Ô0€Gİ"Ô-¨l¸CÑ@Ô@€LØ#‚~€~Ø˜ÒĞØĞ  [°BÒ%6Ğ%6¸;È"Ò;LĞ;Lå˜q " bÑ)Ô)Ğ)İÔ+¨BÑ/Ô/€DØĞĞĞİ$Ô6°q¸"¸tÀa¹x¸jÑIÔI€Nİ$Ô6°q¸"¸tÀa¹x¸jÑIÔI€NİØ	ˆ>˜>¨1°%Àğñ ô ğ r   c                óB  — t          j        |¦  «        }|€J ‚t          j        | t          | |t          j        | d¦  «        ¦  «        dgd¬¦  «        }t          | |¦  «        }t          j        | t          | |t          j        | d¦  «        ¦  «        dgd¬¦  «        }t          | |¦  «        } | j        dgt          | t          j        | d¦  «        |¦  «        ||g¢R ddi} | j        dg|||g¢R ddi}	t          | |t          | |	dd¦  «        ¦  «        }
-t          j                             |
-¦  «        }|                      d	t          j        | d
-¦  «        |                     ¦   «         ¬¦  «        }t          j        | d|
-|d¬¦  «        }
-t          | |
-¦  «        }
-|
-S )Nrğ  r.  Tr°  r5  g       Àr6  r  rq  r´  rr  r`  r[  r–  )r   rœ  r´  r³   rò  r«   r%  rš   r   rı   r	   rw  rx  r|  r™  rí   )r)  r@  rA  r%  Úx1_normÚx1_padÚx2_normÚx2_padÚx1_Úx2_rø  r‚  r”   s                r  rÛ  rÛ  $  sã  € õ Ô+¨BÑ/Ô/€DØĞĞĞİÔ/Ø	İˆAˆr•?Ô;¸A¸sÑCÔCÑDÔDØˆtØğ	ñ ô €Gõ q˜'Ñ"Ô"€FİÔ/Ø	İˆAˆr•?Ô;¸A¸sÑCÔCÑDÔDØˆtØğ	ñ ô €Gõ q˜'Ñ"Ô"€FØ
-ˆ!Œ$Øğõ •?Ô;¸A¸tÑDÔDÀbÑIÔIØØğ
-
-ğğ ğ ğ ğğ €Cğ ˆ!Œ$ˆxĞ
-;˜2˜v wĞ/Ğ
-;Ğ
-;Ğ
-;¸Ğ
-;Ğ
-;€CİAsI a¨¨b°"Ñ5Ô5Ñ6Ô6€FİÔ%×0Ò0°Ñ8Ô8€EØ
-$Š$Ø•Ô8¸¸CÑ@Ô@ÀuÇÂÑGXÔGXğ ñ ô €Cõ Ô9Ø	ˆ5&˜#¨Bğñ ô €Fõ !V‰_Œ_€FØ€Mr   z
-aten::lerpc                óì  — |                       d||¦  «        }t          | |                       d||                       dt          j        d¦  «        ¬¦  «        ¦  «        |                       d||                       d||¦  «        ¦  «        |                       d||                       d||                       d|                       dt          j        d¦  «        ¬¦  «        |¦  «        ¦  «        ¦  «        ¦  «        S )	NrP  rï  r`  rn  ra  rD  rG  r]  )r%  r  rc  rù   )r)  r>  r,  rE  Údiffs        r  rt   rt   N  sÙ   € ğ 4Š4s˜DÑ!Ô!€DİØ	Ø	ŠˆVV˜QŸTšT *µe´lÀ3Ñ6GÔ6G˜TÑHÔHÑIÔIØ	ŠˆUD˜!Ÿ$š$˜u f¨dÑ3Ô3Ñ4Ô4Ø	ŠØØØDŠDØØØ—’U˜AŸDšD µU´\À#Ñ5FÔ5F˜DÑGÔGÈÑPÔPñô ñ	
-ô 	
-ñ	ô ğ r   zaten::broadcast_tensorsc                óÀ   ‡ ‡— t          j        |¦  «        }t          ‰ |d         ¦  «        Š|D ]}t          ‰ ‰|¦  «        ŠŒˆ ˆfd„|D ¦   «         } ‰ j        dg|¢R  S )Nr   c                ó2   •— g | ]}t          ‰|‰¦  «        ‘ŒS r!  )rN   )r  rô   r)  Út_with_final_shapes     €€r  r­  z%broadcast_tensors.<locals>.<listcomp>m  s&   ø€ ĞGĞGĞG°ai˜˜1Ğ0Ñ1Ô1ĞGĞGĞGr   re  )r   r   r  r   r%  )r)  r>  Úall_tensorsrô   Út_listrí  s   `    @r  r(   r(   c  s†   øø€ å!Ô.¨tÑ4Ô4€Kİ# A {°1¤~Ñ6Ô6Ğğ ğ ;ğ ;ˆİ  Ğ$6¸Ñ:Ô:ĞĞàGĞGĞGĞGĞG¸;ĞGÑGÔG€FØˆ1Œ4Ğ%Ğ/¨Ğ/Ğ/Ğ/Ğ/r   zaten::is_pinnedc                ó   — d S r  r!  )r)  r>  r¦  s      r  rm   rm   q  s	   € ğ ˆ4r   úprim::ConstantSplitc           	     óô   — t          j        ||¦  «        }|€t          j        dd|¦  «        S |g||z  z  }||z  }|r|                     |¦  «         |                      d|||t          |¦  «        ¬¦  «        S )Nrñ  r]  r^  r_  )r   r¢  rb  r  r%  rX  )r)  r>  re  rB   rå   rf  rg  s          r  r¶   r¶   w  s   € åÔ/°°cÑ:Ô:€DØ€|İÔ-Ø!Ğ#;¸Tñ
-ô 
-ğ 	
-ğ ˆ\˜T ZÑ/Ñ0€FØjÑ €HØğ  ØŠhÑÔĞØ4Š4˜ v°cÅ3ÀvÁ;Ä;ˆ4ÑOÔOĞOr   úprim::ConstantChunkc                ó–   — t          j        ||¦  «        }|€t          j        dd|¦  «        S ||z   dz
-  |z  }t          | |||¦  «        S )Nró  r]  rF  )r   r¢  rb  r¶   )r)  r>  rc  rB   r‰  re  s         r  rµ   rµ   ‰  sa   € åÔ3°D¸#Ñ>Ô>€HØĞİÔ-Ø!Ğ#;¸Tñ
-ô 
-ğ 	
-ğ ˜VÑ# aÑ'¨FÑ2€Jİ˜q $¨
-°CÑ8Ô8Ğ8r   zprim::shapec                ó.   — |                       d|¦  «        S r-  r/  r—  s     r  rÂ   rÂ   ”  s   € à4Š4˜ÑÔĞr   z	prim::maxc                ó4   — t          j        | d||d¬¦  «        S )Nr`  r[  r–  r˜  rU  s      r  rÀ   rÀ   ™  s'   € åÔ7Ø	ˆ5$˜¨Bğñ ô ğ r   z	prim::minc           
-     óâ   — |s]t          j        |¦  «        r9t          | ||                      dt	          j        dg¦  «        ¬¦  «        ¦  «        }t          | |¦  «        S t          | ||¦  «        S r   )r   r3  rğ   r%  rc  rù   r”   rU  s      r  rÁ   rÁ      sk   € àğ İÔ*¨4Ñ0Ô0ğ 	Oİ˜˜D !§$¢$ z½5¼<ÈÈÑ;LÔ;L $Ñ"MÔ"MÑNÔNˆDİ1d‰|Œ|Ğİˆq$˜ÑÔĞr   z
-prim::datac                ó   — |S r  r!  r—  s     r  r¸   r¸   ©  r±  r   zprim::layoutc                óT   — |                       dt          j        d¦  «        ¬¦  «        S r   r¸  r—  s     r  r¼   r¼   ®  s"   € ğ 4Š4
-¥E¤L°¡O¤Oˆ4Ñ4Ô4Ğ4r   re  c                ó   — d S r  r!  ©r)  r{  ræ  s      r  r½   r½   µ  ó   € àˆ4r   zprim::ListUnpackúlist[_C.Value] | Nonec                óÀ   — t          |¦  «        dk    rJ|d                              ¦   «                              ¦   «         dk    rt          j        |d         ¦  «        S d S )NrF  r   re  )rX  r¤  r³  r   r   rû  s      r  r¾   r¾   º  sV   € õ ˆ6{„{aÒĞ˜F 1œIŸNšNÑ,Ô,×1Ò1Ñ3Ô3Ğ7LÒLĞLõ Ô+¨F°1¬IÑ6Ô6Ğ6àˆ4r   zprim::TupleConstructc                ó   — d S r  r!  rû  s      r  rÄ   rÄ   Æ  rü  r   zprim::Uninitializedc                ó   — d S r  r!  rû  s      r  rÇ   rÇ   Ë  rü  r   zprim::unchecked_castc                ó   — |S r  r!  r—  s     r  rÆ   rÆ   Ô  r±  r   zprim::dtypec                ó¢   — t          j        |¦  «        }|€t          j        j        }|                      dt          j        |¦  «        ¬¦  «        S r_  )r   rÄ  r	   rw  r{  r%  rc  rù   )r)  r>  r~  s      r  rº   rº   Ù  sC   € å!Ô6°tÑ<Ô<€KØĞİ!Ô/Ô5ˆà4Š4
-¥E¤L°Ñ$=Ô$=ˆ4Ñ>Ô>Ğ>r   úprim::tolistc                óh   — t          j        |d¦  «        }|dk    rt          j        dd|¦  «        S |S )zÂtolist is currently supported only for 1D input tensors.
-
-    dim_val and elem_ty_val represent dimension and type annotations
-    that need to match dimension and type of the input tensor.
-    r˜  rF  r  zdim_val > 1)r   r1  rb  )r)  r1  Údim_valÚelem_ty_valrB   s        r  rÃ   rÃ   â  s9   € õ Ô
-*¨7°CÑ
-8Ô
-8€CØ
-ˆQ‚w€wİÔ-¨n¸mÈUÑSÔSĞSØ€Lr   r  ÚNonec                ó  — | j                              ¦   «                              ¦   «         }t          |t          j        ¦  «        rd S t          j        dd|                     ¦   «         › d| j                              ¦   «         ¦  «        S )Nr  z,output type should be 'DeviceObjType', not 'ú')	Úoriginal_noder  r  r7  r   rl  r   rb  r³  )r)  r{  ræ  Úoutput_types       r  r¹   r¹   ò  s~   € à”/×(Ò(Ñ*Ô*×/Ò/Ñ1Ô1€Kİ+rÔ/Ñ0Ô0ğ ØˆtåÔ)ØØL°{×7GÒ7GÑ7IÔ7IĞLĞLĞLØ	Œ×ÒÑ Ô ñô ğ r   z
-prim::Loopúlist[_C.Value]c           	     ó
-  — | j         }| j        }| j        }| j        }t          j        }t          j        }t          |                     ¦   «         ¦  «        }	t          j
-        | dg|¢R |                     ¦   «         t          |	¦  «        dœ\  }
-}}t          |	|¦  «        D ]\  }}t          |                     ¦   «         ¦  «        D ]Ã\  }}|dk    r@|t          |¦  «        k     r-|                     ||                              ¦   «         ¦  «         |dk    rr|dz   t          |¦  «        k     r\t%          |                     ¦   «         t&          j        ¦  «        s0|                     ||dz                                 ¦   «         ¦  «         ŒÄt*          j                             ||j        |||d¦  «         Œt*          j                             ||¦  «        }t          j        r!t*          j                             |||¦  «         |S )NÚLoop©ra  Ún_blocksr   rF  F)r
-  ÚenvÚvalues_in_envÚparams_dictr   r×  rŞ  rã  Úblocksr   Úadd_op_with_blocksÚoutputsSizerX  rä  r  r{  r&  r  r7  r   r'  rc  Ú_jit_pass_onnx_blockÚblockÚ%_jit_pass_fixup_onnx_controlflow_nodeÚonnx_shape_inferenceÚ(_jit_pass_onnx_node_shape_type_inference)r)  r{  Úattrsr¤  r  r  r  r×  Úopset_versionÚ
-old_blocksÚ_new_op_outputsÚnew_block_contextsÚnew_nodeÚ	old_blockÚnew_block_contextr˜  Úb_inÚfixed_outputss                     r  r¿   r¿   ÿ  s   € àŒ?€DØ
-Œ%€CØ”O€MØ”-€Kå"Ô7ĞİÔ5€Måt—{’{‘}”}Ñ%Ô%€Jİ4=Ô4PØ	ˆ6ğ5Øğ5ğ 5Ø$(×$4Ò$4Ñ$6Ô$6ÅÀZÁÄğ5ğ 5ğ 5Ñ1€OĞ'¨õ ),¨JĞ8JÑ(KÔ(Kğ 
-ñ 
-Ñ$ˆ	Ğ$õ ! ×!1Ò!1Ñ!3Ô!3Ñ4Ô4ğ 	3ğ 	3‰GˆAˆtØAŠvˆv˜!c &™kœkš/˜/Ø—’˜V AœYŸ^š^Ñ-Ô-Ñ.Ô.Ğ.ğ
- A’Ø˜‘Uc &™kœkÒ)Ğ)İ" 4§9¢9¡;¤;µ´Ñ@Ô@ğ *ğ —’˜V A¨¡Eœ]×/Ò/Ñ1Ô1Ñ2Ô2Ğ2øİŒ×%Ò%ØØÔ#Ø ØØØñ	
-ô 	
-ğ 	
-ñ 	
-õ ”H×BÒBØ-ñô €Mõ Ô#ğ 
-İŒ×9Ò9Øk =ñ	
-ô 	
-ğ 	
-ğ Ğr   zprim::Ifc           	     ó¤  — | j         }| j        }| j        }| j        }| j        }t
-          j        }t
-          j        }	|d                              ¦   «          	                    ¦   «         dk    }
-|
-rzt          j        |d                              ¦   «         d¦  «                             ¦   «         }t          |t          ¦  «        rt          |¦  «        nt!          |¦  «        }|rdnd}t          |                     ¦   «         ¦  «        |         }t$          j                             |||||d¦  «        }t          |                     ¦   «         ¦  «        }t          |                     ¦   «         ¦  «        }g }t-          t/          |¦  «        ¦  «        D ]T}||         |vr%t1          j        d||         › d||         ¦  «        ‚|||                  }|                     |¦  «         ŒU|S t7          |                     ¦   «         ¦  «        }t9          j        | dg|¢R |                     ¦   «         t/          |¦  «        d	œ\  }}}t?          ||¦  «        D ].\  }}t$          j                             ||j        |||d
-¦  «         Œ/t$          j                              ||	¦  «        }t
-          j!        r!t$          j         "                    |||	¦  «         |S )Nr   rk  rf  rF  TzThe sub block ATen output z is not in env.ÚIfr  F)#r
-  r  r  r  r  r   r×  rŞ  r¤  r³  r   rj  r½  r7  r8  r£  r  r  rc  r   r  ra  r)  rX  r
-   rm  r  rã  r   r  r  rä  r  r  r  )r)  r{  r  r*  r  r  r  r  r×  r  Ú	static_ifÚ
-input_flagrÇ  Ú	block_idxÚ	current_bÚif_output_listÚcurrent_b_listÚfinal_b_listr'  Úonnx_br  r  r   r!  r"  r#  r%  s                              r  r»   r»   4  sØ  € à	Œ€AØŒG€EØ
-Œ%€CØ”O€MØ”-€Kå"Ô7ĞİÔ5€Màq”	—’Ñ Ô ×%Ò%Ñ'Ô'Ğ+;Ò;€IØñ Lõ4 %Ô.¨v°a¬y¯~ª~Ñ/?Ô/?ÀÑIÔI×PÒPÑRÔRˆ
-å)¨*µdÑ;Ô;ĞQC
-‰OŒOˆOÅÀjÑAQÔAQğ 	ğ %Ğ+AA¨!ˆ	İ˜Ÿš™œÑ$Ô$ YÔ/ˆ	İŒh×+Ò+ØØØ ØØØñ
-ô 
-ˆõ ˜aŸiši™kœkÑ*Ô*ˆİ˜i×/Ò/Ñ1Ô1Ñ2Ô2ˆàˆİ˜^Ñ,Ô,Ñ-Ô-ğ 	(ğ 	(ˆCØ˜cÔ"¨#Ğ-Ğ-İÔ/ØU°ÀÔ1DĞUĞUĞUØ" 3Ô'ñô ğ ğ ˜¨Ô,Ô-ˆFØ×Ò Ñ'Ô'Ğ'Ğ'ØĞå˜1Ÿ8š8™:œ:Ñ&Ô&ˆ
-İ8AÔ8TØˆtğ9
-Øğ9
-ğ 9
-Ø&'§m¢m¡o¤oÅÀJÁÄğ9
-ğ 9
-ğ 9
-Ñ5ˆĞ+¨Xõ -0°
-Ğ<NÑ,OÔ,Oğ 	ğ 	Ñ(ˆIĞ(İŒH×)Ò)ØØ!Ô'Ø$ØØØñô ğ ğ õ œ×FÒFØmñ
-ô 
-ˆõ Ô'ğ 	İŒH×=Ò=Ø˜+ }ñô ğ ğ Ğr   r$  c           	     ó4  ‡ — ‰ j         }|                     ¦   «         rd S t          |                     ¦   «                              ¦   «         t
-          j        ¦  «        rd S |                     d¦  «        dk    r*‰                      dt          j
-        |d¦  «        ¬¦  «        S |                     d¦  «        dk    r*‰                      dt          j
-        |d¦  «        ¬¦  «        S |                     ¦   «                              ¦   «                              t
-          j                             ¦   «         ¦  «        sU|                     ¦   «                              ¦   «                              t
-          j                             ¦   «         ¦  «        r<‰                      dt          j        t          j
-        |d¦  «        ¦  «        ¬¦  «        S |                     ¦   «                              ¦   «                              t
-          j                             ¦   «         ¦  «        r/ˆ fd„t          j
-        |d¦  «        D ¦   «         } ‰ j        dg|¢R  S t%          j        d	|                     d¦  «        › d
-t(          j        › d|                     ¦   «         ¦  «        ‚)Nrf  rô   r`  ra  rh  ©Úvalue_sc                ó>   •— g | ]}‰                      d |¬¦  «        ‘ŒS )r`  r1  r/  )r  rh  r)  s     €r  r­  z!prim_constant.<locals>.<listcomp>¥  s9   ø€ ğ 
-ğ 
-ğ 
-àğ DŠD QˆDÑ'Ô'ğ
-ğ 
-ğ 
-r   re  z"Unsupported prim::Constant kind: 'z'. Please send a bug report at ú.)r
-  rx  r7  r  r  r   rl  rm  r%  r   rj  r  r  r  ÚofFloatsrc  rù   Ú	ofStringsr
-   rm  r   ÚPYTORCH_GITHUB_ISSUES_URL)r)  r{  r  r¤  Ústr_constantss   `    r  r·   r·     sW  ø€ àŒ?€Dà‡‚ÑÔğ Øˆtõ $—+’+‘-”-×$Ò$Ñ&Ô&­Ô(8Ñ9Ô9ğ ØˆtØ‡{‚{7ÑÔ˜sÒ"Ğ"ØtŠtJ­Ô(AÀ$ÈÑ(PÔ(PˆtÑQÔQĞQØ‡{‚{7ÑÔ˜sÒ"Ğ"ØtŠtJ­Ô(AÀ$ÈÑ(PÔ(PˆtÑQÔQĞQØ‡{‚{}„}×ÒÑÔ×'Ò'İ
-Œ×ÒÑÔñô ğ 
-à	Š‰Œ×	Ò	Ñ	Ô	×	)Ò	)­"¬+×*>Ò*>Ñ*@Ô*@Ñ	AÔ	Ağ
-ğ tŠtØ¥¤­_Ô-FÀtÈWÑ-UÔ-UÑ VÔ Vğ ñ 
-ô 
-ğ 	
-ğ ‡{‚{}„}×ÒÑÔ×'Ò'­¬×(=Ò(=Ñ(?Ô(?Ñ@Ô@ğ ;ğ
-ğ 
-ğ 
-ğ 
-å$Ô.¨t°WÑ=Ô=ğ
-ñ 
-ô 
-ˆğ ˆqŒtĞ)Ğ:¨MĞ:Ğ:Ğ:Ğ:å
-Ô
-#ğ	O¨T¯[ª[¸Ñ-AÔ-Ağ 	Oğ 	Oİ'1Ô'Kğ	Oğ 	Oğ 	OàŠ‰Œñô ğ r   ú
-prim::typeÚdevice_valuec                ó>  — |                      ¦   «                              ¦   «         dk    r^t          j        |                      ¦   «                              ¦   «         ¦  «        }|$|                      dt          |¦  «        ¬¦  «        S t          j        dd|¦  «        S )Nr  r`  r1  r9  z,Device type cannot be statically determined.)	r¤  r³  r   Úget_device_from_valuer1  r%  r  r   rb  )r)  r:  rZ  ræ  r¦  s        r  rÅ   rÅ   ²  s   € à×ÒÑÔ×ÒÑ!Ô! ^Ò3Ğ3İÔ0°×1BÒ1BÑ1DÔ1D×1JÒ1JÑ1LÔ1LÑMÔMˆØĞØ—4’4˜
-­C°©K¬K4Ñ8Ô8Ğ8åÔ)ØØ6Øñô ğ r   zonnx::Placeholderc                ó~   — | j         }| j        }| j        }| j        }t          j                             ||||¦  «        S r  )r
-  r  r  r  rc  r   Ú'_jit_onnx_convert_pattern_from_subblock)r)  r{  r  r¤  r  r  r  s          r  r­   r­   À  sA   € àŒ?€DØŒG€EØ
-Œ%€CØ”O€MåŒ8×;Ò;ØˆtS˜-ñô ğ r   zaten::resolve_conjzaten::resolve_negc                ó   — |S r  r!  r0  s     r  r  r  Ì  s	   € ğ €Lr   zaten::_conjzaten::conj_physicalc                ót   — t          j        |¦  «        rt          j        d|¦  «        S t          | |¦  «        S )Nz aten::_conj, aten::conj_physical)r   Úis_complex_valuer  r  r0  s     r  r  r  ×  sD   € õ Ô'¨Ñ.Ô.ğ 
-åÔ0Ø.Øñ
-ô 
-ğ 	
-õ " ! UÑ+Ô+Ğ+r   zaten::logitc                ó‚  — |                       dt          j        d¦  «        ¬¦  «        }t          j        |¦  «        s½|                       d|t
-          j                             |¦  «                             ¦   «         ¬¦  «        }|                       d||¦  «        }|                       d||¦  «        }|                       d|||¦  «        }|                       d	||¦  «        }|                       d|||¦  «        }n|}|                       d||¦  «        }	|                       d
-||	¦  «        }
-|                       d|
-¦  «        S )Nr`  r]  ra  rq  rr  rP  rí  rî  rï  rp  rQ  )	r%  rc  rù   r   rK  r	   rw  rx  r|  )r)  r>  ræ  r‹  Úone_sub_epsÚself_less_equal_one_sub_epsÚtemporary_selfÚtemporary_self_less_epsÚzró   rC   s              r  r†   r†   ê  s(  € à
-$Š$ˆz¥5¤<°Ñ#4Ô#4ˆ$Ñ
-5Ô
-5€CåÔ# CÑ(Ô(ğ ØdŠdØCkÔ7×BÒBÀ4ÑHÔH×RÒRÑTÔTğ ñ 
-ô 
-ˆğ —d’d˜5 # sÑ+Ô+ˆØ&'§d¢d¨9°kÀ4Ñ&HÔ&HĞ#ØŸš˜gĞ'BÀDÈ+ÑVÔVˆà"#§$¢$ v¨~¸sÑ"CÔ"CĞØDŠDĞ1°3¸ÑGÔGˆˆàˆà
-$Š$ˆuc˜1Ñ
-Ô
-€CØ
-$Š$ˆua˜Ñ
-Ô
-€CØ4Š4sÑÔĞr   )r  r  )r)  r+  r  )r]  )T)r  r  r  r  r  r  r›  )F)r)  r+  r1  r¤  r¥  r‘  r¦  r  )rB   rÀ  )r)  r+  r1  r¤  r®   r¤  )
-r)  r+  r1  r¤  r®   r¤  rN  r¤  rf  r¤  )r  r  rB   rÀ  rC  r  )r  r   rd  r   )NNN)r)  r+  r1  r¤  rì  rô  rE  r¤  r²  r¤  ræ  r‘  rd  rí  )r)  r+  r1  r¤  rì  rô  rE  r¤  r²  r¤  ræ  r‘  rş  r  rd  r¤  )
-r)  r+  r   r  rå  r   ræ  r   r¸  r  )FF)NN)FN)NNNFN)NNF)r)  r+  r>  r¤  rá  r‘  râ  r‘  )r³  r  )NNFN)r)  r+  r1  ræ  rB   ræ  r8  r  )r)  r+  r>  ræ  r?  ræ  rB   r@  r8  r  r‚  ræ  )r)  r+  r>  ræ  r?  r‘  rB   r@  r8  r  r‚  ræ  )r)  r+  r>  ræ  r?  ræ  rB   rG  r8  r  r‚  ræ  r¹  )NF)r)  r+  r]  r^  )r  )r)  r+  r>  ræ  rl  r  )TNNNNF)r)  r+  r‚  r¬  )rğ  rØ  )r)  r+  rd  rı  )r)  r+  rd  r  )r)  r+  rd  r  )r)  r+  r:  r¤  )r)  r+  r1  r¤  )r)  r+  r>  ræ  ræ  ræ  (o  Ú__doc__Ú
-__future__r   r%  ra  rğ  rÆ  rC  Útypingr   r   Útyping_extensionsr   rc  Útorch._C._onnxr   Ú_onnxrt  Útorch.nn.modules.utilsÚ
-torch.onnxr   r	   r
-   r   Útorch.onnx._globalsr   Útorch.onnx._internalr   r   Úcollections.abcr   Útorch.typesr   r  ÚpartialÚonnx_symbolicÚ_onnx_symbolicr"  r  r2  r:  rí  r×   rÖ   r   ró   rÛ   rš   rC   rî  r   rY  rl  rk  rS   rU   rş   rÎ   r+   rğ   r°  r—   r'   r   r   r    rí   rÚ   r÷   rä   r=   rö   r   r   r    r!   rá   râ   r  Ú_apply_paramsr  r@   r  r  rô   r©   rO   r)   rN   rH   rG   rå   rı   r°   r  r  r  rì   r  rë   r  r   rß   rî   rï   r´   rã   r–   rĞ   rÑ   r-   rT   r¢  rú   rs   r]   rç   rè   r\   ÚnnÚmodulesÚutilsÚ_singleÚ_pairÚ_triplerï  r   r   r   r  r  r  r"  r2   r/  rÏ   rÕ   r®   rM  rS  r%   r&   r  r  ri  rK   rŸ   r_   rs  rŠ   r{  rZ   rr   r  r„  r†  r‚   r„   r…   rƒ   r–  rš  r  r}   r¦  r¼  rÅ  r<   r8   r9   r:   r5   r6   r7   r#   r   rq   rk   r  rF   rà   ri   rh   rg   rf   r*   rÿ   r>   r¯   r1   r   r~   r€   r   r³   r0   r/   r.   r‘   r’   r”   r•   r   r   r   rM   rE   r  r§   r4   r‡  r‹  r  r“  r–  r˜  rš  r  rŸ  r¡  r£  rJ   rI   r¡   rÜ   rù   r   r  r  r¤   r  r¬   r«   r£   rX   rW   r¢   rP   ræ   rd   rc   rb   rø   ra   ré   r   r  rê   r¨   rü   r;   rû   rÔ   rÓ   r±   r²   r€  r†  r‰  r‰   rˆ   r  r£  rA   r3   r«  r¯  rË   rÊ   rÍ   rÉ   rÌ   rÈ   rÙ   r$   r|   rL   rR   r¦   r¥   rn   rá  rã  r   r   r   rŞ   rİ   r   rl   rı  rÿ  rª   rY   r	  rò   r
-  r	  rñ   r‡   r   r{   ru   r‹   rŒ   rj   rx   ry   rw   rv   rV   r›   r"   r“   rÒ   r[   r^   r€  rB   r‰  r‹  ro   rõ   r“  r™  rp   r™   r   r§  rª  rz   r`   rœ   rD   r˜   rQ   re   rØ   r?   r,   rÛ  rt   r(   rm   r¶   rµ   rÂ   rÀ   rÁ   r¸   r¼   r½   r¾   rÄ   rÇ   rÆ   rº   rÃ   r¹   r¿   r»   r·   rÅ   r­   r  r  r†   r!  r   r  ú<module>r^     sAT  ğğğ ğ #Ğ "Ğ "Ğ "Ğ "Ğ "à €€€Ø Ğ Ğ Ğ Ø €€€Ø 
-€
-€
-€
-Ø €€€Ø *Ğ *Ğ *Ğ *Ğ *Ğ *Ğ *Ğ *Ø (Ğ (Ğ (Ğ (Ğ (Ğ (à €€€Ø  Ğ  Ğ  Ğ  Ğ  Ğ  Ğ  Ğ  Ğ  Ø Ğ Ğ Ğ Ø Ğ Ğ Ğ Ø Ğ Ğ Ğ Ğ Ğ ğ HĞ GĞ GĞ GĞ GĞ GĞ GĞ GĞ GĞ GĞ GĞ GØ 'Ğ 'Ğ 'Ğ 'Ğ 'Ğ 'Ø 8Ğ 8Ğ 8Ğ 8Ğ 8Ğ 8Ğ 8Ğ 8ğ ğ #Ø(Ğ(Ğ(Ğ(Ğ(Ğ(à"Ğ"Ğ"Ğ"Ğ"Ğ"ğ
-Cğ Cğ C€ğL #Ô" <Ô#=ÀQĞGÑGÔG€ñğ ğ ğ ğğ ğ ğ €Ğ(Ñ)Ô)ñ ğ  ğ  ñ *Ô)ğ ğ €Ğ,Ñ-Ô-ñ$ğ $ğ $ñ .Ô-ğ$ğ €Ñ Ô Ø€Ô Ñ%Ô%ñ;ğ ;ğ ;ñ &Ô%ñ !Ô ğ;ğ €Ğ"Ñ#Ô#Ø€Ô Ñ%Ô%ñ#ğ #ğ #ñ &Ô%ñ $Ô#ğ#ğ
- €ÑÔñ$ñ $ğ $ğ $ñ Ôğ$ğ0 €ÑÔñ$ñ $ğ $ğ $ñ Ôğ$ğ* €ÑÔñ,ñ ,ğ ,ğ ,ñ Ôğ,ğ €ÑÔñ(ğ (ğ (ñ Ôğ(ğ €ÑÔñ9ğ 9ğ 9ñ Ôğ9ğ €Ñ Ô Ø€Ô˜C  c¨3Ñ/Ô/ñFñ Fğ Fğ Fñ 0Ô/ñ !Ô ğFğ
- €Ô˜C  cÑ*Ô*ñ
-ğ 
-ğ 
-ñ +Ô*ğ
-ñğ ğ ğ ñ>'ğ 'ğ 'ğ 'ğ0 €Ğ$Ñ%Ô%ñ)ğ )ğ )ñ &Ô%ğ)ğ
- €Ğ Ñ!Ô!ñ(ğ (ğ (ñ "Ô!ğ(ğ €Ğ#Ñ$Ô$ñ$ğ $ğ $ñ %Ô$ğ$ğ6 €Ğ"Ñ#Ô#ñ$ğ $ğ $ñ $Ô#ğ$ğ €ÑÔØ€Ô˜C Ñ%Ô%ñ#0ğ #0ğ #0ñ &Ô%ñ Ôğ#0ğL €ÑÔØ€Ô˜C Ñ%Ô%ñ3ğ 3ğ 3ñ &Ô%ñ Ôğ3ğ €ÑÔñğ ğ ñ Ôğğ €
-ÑÔñAğ Ağ Añ ÔğAğ €ÑÔñ'ğ 'ğ 'ñ Ôğ'ğ €ÑÔñ'ğ 'ğ 'ñ  Ôğ'ğ €ÑÔØ€Ô˜C  c¨3°Ñ4Ô4ñ2ğ 2ğ 2ñ 5Ô4ñ Ôğ2ğj €ÑÔñğ ğ ñ Ôğğ €ÑÔñğ ğ ñ Ôğğ  €ÑÔñğ ğ ñ Ôğğ €ÑÔà€Ô ¨KÀCĞHÑHÔHñğ ğ ñ IÔHñ Ôğğ €ÑÔñğ ğ ñ Ôğğ €ÑÔñğ ğ ñ Ôğğ €ÑÔñğ ğ ñ Ôğğ €ÑÔñğ ğ ñ Ôğğ €ÑÔñğ ğ ñ Ôğğ €ÑÔñğ ğ ñ Ôğğ €ÑÔñğ ğ ñ Ôğğ* €Ñ Ô à€Ô ¨KÀAĞFÑFÔFñ!ğ !ğ !ñ GÔFñ !Ô ğ!ğ €ÑÔñğ ğ ñ Ôğğ  €Ô Ñ%Ô%ñKğ Kğ Kñ &Ô%ğKğ €ØĞ8˜?Ô8¸ÀeÑLÔLĞMğñ ô ğ €ØĞ9˜OÔ9¸,ÈÑOÔOĞPğñ ô ğ €Øà%ˆÔ%Ø˜&¸%ğ	
-ñ 	
-ô 	
-ğğñ ô ññ ğ ğ ñô ñ	ô ñô ğğ €ÑÔØ€Ô˜C  fÑ-Ô-ñDğ Dğ Dñ .Ô-ñ  ÔğDğ €Ğ)Ñ*Ô*ñHğ Hğ Hñ +Ô*ğHğ €Ğ'Ñ(Ô(ñFğ Fğ Fñ )Ô(ğFğ €	ÑÔñ2ğ 2ğ 2ñ Ôğ2ğ €Ñ Ô Ø€Ô Ñ%Ô%ñ1ğ 1ğ 1ñ &Ô%ñ !Ô ğ1ğ €ÑÔØ€Ô Ñ%Ô%ñ&ğ &ğ &ñ &Ô%ñ  Ôğ&ğ& €Ğ$Ñ%Ô%Ø€Ô Ñ%Ô%ñ&ğ &ğ &ñ &Ô%ñ &Ô%ğ&ğ$ €Ğ!Ñ"Ô"Ø€Ô  dÑ+Ô+ñ'ğ 'ğ 'ñ ,Ô+ñ #Ô"ğ'ğ" €Ğ!Ñ"Ô"Ø€Ô Ñ%Ô%Ø€Ô˜C  c¨3°Ñ4Ô4ñ+ğ +ğ +ñ 5Ô4ñ &Ô%ñ #Ô"ğ+ğ0 €Ğ%Ñ&Ô&Ø€Ô Ñ%Ô%Ø€Ô˜C  c¨3°°S¸#¸sÀCÑHÔHñPğ Pğ Pñ IÔHñ &Ô%ñ 'Ô&ğPğ( €ÑÔØ€Ô °eĞ<Ñ<Ô<ñ6ñ 6ğ 6ğ 6ñ =Ô<ñ Ôğ6ğ €Ğ!Ñ"Ô"Ø€Ô Ñ%Ô%Ø€Ô˜C  cÑ*Ô*ñ
-ğ 
-ğ 
-ñ +Ô*ñ &Ô%ñ #Ô"ğ
-ğ" €Ñ Ô Ø€Ô˜C Ñ&Ô&ñ0ğ 0ğ 0ñ 'Ô&ñ !Ô ğ0ğ €ÑÔØ€Ô Ñ%Ô%ñ"ğ "ğ "ñ &Ô%ñ Ôğ"ğ €Ñ Ô ñ#ğ #ğ #ñ !Ô ğ#ğ
- €Ğ$Ñ%Ô%Ø€Ô˜C  c¨3Ñ/Ô/ñMñ Mğ Mğ Mñ 0Ô/ñ &Ô%ğMğ$ €ÑÔØ€Ô˜C  c¨3Ñ/Ô/ñMñ Mğ Mğ Mñ 0Ô/ñ ÔğMğ2 €Ğ$Ñ%Ô%àHLñ>ñ >ğ >ğ >ñ &Ô%ğ>ğ €Ğ(Ñ)Ô)Ø€Ô˜C  s¨CÑ0Ô0ñRñ Rğ Rğ Rñ 1Ô0ñ *Ô)ğRğ €Ğ/Ñ0Ô0à@DñAñ Ağ Ağ Añ 1Ô0ğAğ €ÑÔØ€Ô˜C  cÑ*Ô*ññ ğ ğ ñ +Ô*ñ  Ôğğ €ÑÔØ€Ô Ñ%Ô%Ø€Ô˜C  cÑ*Ô*ñ7ğ 7ğ 7ñ +Ô*ñ &Ô%ñ  Ôğ7ğ( €ÑÔñ#ğ #ğ #ñ  Ôğ#ğ €Ñ Ô ñ;Jñ ;Jğ ;Jğ ;Jñ !Ô ğ;Jğ| €ÑÔñ'ğ 'ğ 'ñ Ôğ'ğ, €ÑÔñ6ğ 6ğ 6ñ Ôğ6ğ €ÑÔñEğ Eğ Eñ ÔğEğ €ÑÔØ€Ô Ñ%Ô%ñğ ğ ñ &Ô%ñ Ôğğ €ÑÔØ€Ô Ñ%Ô%ñ!ğ !ğ !ñ &Ô%ñ Ôğ!ğ €ÑÔñğ ğ ñ Ôğğ €ÑÔñ ğ  ğ  ñ Ôğ ğ €ÑÔñ9ğ 9ğ 9ñ Ôğ9ğ
- €Ğ!Ñ"Ô"Ø€Ô˜C  cÑ*Ô*ñğ ğ ñ +Ô*ñ #Ô"ğğ €Ğ"Ñ#Ô#Ø€Ô Ñ%Ô%Ø€Ô˜C  cÑ*Ô*ğ
- ñ	<ñ <ğ <ğ <ñ +Ô*ñ &Ô%ñ $Ô#ğ<ğ €ÑÔØ€Ô˜C Ñ%Ô%ñ7ğ 7ğ 7ñ &Ô%ñ Ôğ7ğ €Ñ Ô Ø€Ô˜C  fÑ-Ô-ñ;ñ ;ğ ;ğ ;ñ .Ô-ñ !Ô ğ;ğ| €Ğ Ñ!Ô!ñ"ğ "ğ "ñ "Ô!ğ"ğ €Ğ-Ñ.Ô.ğ2ğ 2ñ /Ô.ğ2ğj €Øà%ˆÔ%Ø˜%œ(Ô*Ô0Ô8¸!ÈEğ	
-ñ 	
-ô 	
-ğ 	ˆÑÔğ	ğñ ô ğ €Øà%ˆÔ%Ø˜%œ(Ô*Ô0Ô6¸È%ğ	
-ñ 	
-ô 	
-ğ 	ˆÑÔğ	ğñ ô ğ €Øà%ˆÔ%Ø˜%œ(Ô*Ô0Ô8¸!ÈEğ	
-ñ 	
-ô 	
-ğ 	ˆÑÔğ	ğñ ô ğ7ğ 7ñô ñô ñô ğ67ğt J˜.˜.Ğ)HÑIÔIØ€IØ!ØŒÔÔÔ&Ø	Øğ	ñ ô ñô Ğ ğ J˜.˜.Ğ)HÑIÔIØ€IØ!ØŒÔÔÔ$Ø	Øğ	ñ ô ñô Ğ ğ J˜.˜.Ğ)HÑIÔIØ€IØ!ØŒÔÔÔ&Ø	Øğ	ñ ô ñô Ğ ğ €Øà%ˆÔ% l°E´HÔ4DÔ4JÔ4RÑSÔSØˆÑÔğğñ ô ğ €Øà%ˆÔ% l°E´HÔ4DÔ4JÔ4PÑQÔQØˆÑÔğğñ ô ğ €Øà%ˆÔ% l°E´HÔ4DÔ4JÔ4RÑSÔSØˆÑÔğğñ ô ğ4ğ 4ñô ñô ñô ğ*4ğn €Øà%ˆÔ%Ø! =°%´(Ô2BÔ2HÔ2Pñ	
-ô 	
-ğ 	ˆĞ%Ñ&Ô&ğ	ğñ ô ğ €Øà%ˆÔ%Ø! =°%´(Ô2BÔ2HÔ2Nñ	
-ô 	
-ğ 	ˆĞ%Ñ&Ô&ğ	ğñ ô ğ €Øà%ˆÔ%Ø! =°%´(Ô2BÔ2HÔ2Pñ	
-ô 	
-ğ 	ˆĞ%Ñ&Ô&ğ	ğñ ô ğ €Øà%ˆÔ%Ø!ØØŒHÔÔ"Ô*Ø#ñ		
-ô 	
-ğ 	ˆĞ%Ñ&Ô&ğğñ ô ğ €Øà%ˆÔ%Ø!ØØŒHÔÔ"Ô(Ø#ñ		
-ô 	
-ğ 	ˆĞ%Ñ&Ô&ğğñ ô ğ €Øà%ˆÔ%Ø!ØØŒHÔÔ"Ô*Ø#ñ		
-ô 	
-ğ 	ˆĞ%Ñ&Ô&ğğñ ô ñ3ğ 3ğ 3ñô ñô ñô ñô ñô ñô ğ~3ñlğ ğ ğ ğ"ğ ğ ğ" €Ğ'Ñ(Ô(ñğ ğ ñ )Ô(ğñ$&ğ &ğ &ğ &ğR €Ğ(Ñ)Ô)Ø€Ğ(Ñ)Ô)Ø€Ğ(Ñ)Ô)ñğ ğ ñ *Ô)ñ *Ô)ñ *Ô)ğğ €Ñ)Ñ*Ô*Ø€Ñ)Ñ*Ô*Ø€Ñ)Ñ*Ô*ññ ğ ñ +Ô*ñ +Ô*ñ +Ô*ğğ €‘ÑÔñTñ Tğ Tñ ÔğTğ( €Ùà%ˆÔ%Ñ&:¸A¹yÑIÔIØˆÑ$Ñ%Ô%ğğñ ô ğ €Ùà%ˆÔ%Ñ&:¹A¹yÑIÔIØˆÑ$Ñ%Ô%ğğñ ô ğ €Ùà%ˆÔ%Ñ&:¹A¹yÑIÔIØˆÑ$Ñ%Ô%ğğñ ô ğ €Ùà%ˆÔ%Ñ&9¸1¹hÑGÔGØˆÑ#Ñ$Ô$ğğñ ô ğ €Ùà%ˆÔ%Ñ&;¹QÁÑIÔIØˆÑ%Ñ&Ô&ğğñ ô ğ €Ù à%ˆÔ%Ñ&<¹aÁÑJÔJØˆÑ&Ñ'Ô'ğğñ ô ññ ğ ñô ñô ñô ñô ñô ñô ğTğ$ €Ñ%Ñ&Ô&ñ8ñ 8ğ 8ñ 'Ô&ğ8ğ  €Ñ#Ñ$Ô$ññ ğ ñ %Ô$ğğ €Ñ"Ñ#Ô#ñ#ğ #ñ $Ô#ğ#ñ 	ğ 	ğ 	ññ ğ ğ ğ €‘ÑÔññ ğ ñ  Ôğğ €‘
-ÑÔØ€Ô  dÑ+Ô+ñ&ñ &ğ &ñ ,Ô+ñ Ôğ&ğ2 €‘
-ÑÔØ€Ô  dÑ+Ô+Øññ ğ ñ Ôñ ,Ô+ñ Ôğğ €‘
-ÑÔØ€Ô  dÑ+Ô+ñ%ñ %ğ %ñ ,Ô+ñ Ôğ%ñ)ñ )ğ )ğ )ğ €‘
-ÑÔØ€Ô  dÑ+Ô+ñ%ñ %ğ %ñ ,Ô+ñ Ôğ%ñ&ñ &ğ &ğ &ğ €‘
-ÑÔØ€Ô  dÑ+Ô+Øñ%ñ %ğ %ñ Ôñ ,Ô+ñ Ôğ%ğ €‘
-ÑÔØ€Ô  dÑ+Ô+Øñ%ñ %ğ %ñ Ôñ ,Ô+ñ Ôğ%ğ €‘ÑÔñ%ñ %ğ %ñ  Ôğ%ğ  €‘ÑÔñ$ñ $ğ $ñ Ôğ$ğ  €‘ÑÔñ%ñ %ğ %ñ  Ôğ%ğ  €Ñ#Ñ$Ô$ØĞ™fÑ%Ô%ñ%ñ %ğ %ñ &Ô%ñ %Ô$ğ%ğ €Ñ"Ñ#Ô#ØĞ™fÑ%Ô%ñ$ñ $ğ $ñ &Ô%ñ $Ô#ğ$ğ €Ñ#Ñ$Ô$ØĞ™fÑ%Ô%ñ%ñ %ğ %ñ &Ô%ñ %Ô$ğ%ğ €Ñ#Ñ$Ô$ñSñ Sğ Sñ %Ô$ğSğ €Ñ!Ñ"Ô"ññ ğ ñ #Ô"ğğ8 €Ñ!Ñ"Ô"ññ ğ ñ #Ô"ğğ8 €‘ÑÔØ€Ô˜C  c¨3Ñ/Ô/ñ	1ñ 	1ñ 	1ğ 	1ñ 0Ô/ñ Ôğ	1ğ €Ñ#Ñ$Ô$Ø€Ô˜C  fÑ-Ô-ññ ñ ğ ñ .Ô-ñ %Ô$ğğ> €Ñ$Ñ%Ô%Ø€Ô˜C  cÑ*Ô*ñ	&ñ 	&ğ 	&ñ +Ô*ñ &Ô%ğ	&ğ €Ñ$Ñ%Ô%Ø€ÔØˆˆc4˜˜t S¨$°°S¸#¸sÀCñô ğ" ñ@ñ @ñ @ğ @ñô ñ &Ô%ğ@ğF €Ñ)Ñ*Ô*Ø€ÔØØØØØØØñô ñ4ñ 4ğ 4ñô ñ +Ô*ğ4ğn €Ñ#Ñ$Ô$Ø€Ô˜C  c¨4°°t¸SÀ$ÈÑLÔLññ ğ ñ MÔLñ %Ô$ğğ< €‘ÑÔØ€Ô˜C  c¨4°°d¸CÑ@Ô@ñ 
-ñ  
-ğ  
-ñ AÔ@ñ  Ôğ 
-ğF €‘ÑÔØ€Ô˜C  c¨4°°d¸CÑ@Ô@ñ 
-ñ  
-ğ  
-ñ AÔ@ñ  Ôğ 
-ğF €‘ÑÔØ€Ô˜C  c¨4°°d¸CÑ@Ô@ñ 
-ñ  
-ğ  
-ñ AÔ@ñ  Ôğ 
-ğF €Ñ(Ñ)Ô)Ø€Ô˜C  c¨4°°t¸SÀ$ÑGÔGññ ğ ñ HÔGñ *Ô)ğğ: €Ñ(Ñ)Ô)Ø€Ô˜C  c¨4°°t¸SÀ$ÑGÔGññ ğ ñ HÔGñ *Ô)ğğ: €Ñ(Ñ)Ô)Ø€Ô˜C  c¨4°°t¸SÀ$ÑGÔGññ ğ ñ HÔGñ *Ô)ğğ: €Ñ"Ñ#Ô#Ø€Ô˜C  c¨3°°S¸#¸sÀCÑHÔHñ4ñ 4ğ 4ñ IÔHñ $Ô#ğ4ğn €Ñ)Ñ*Ô*Ø€Ô  e¨U°EÑ:Ô:Ø€Ô˜C  s¨C°Ñ5Ô5ñI*ñ I*ğ I*ñ 6Ô5ñ ;Ô:ñ +Ô*ğI*ğX €Ñ"Ñ#Ô#Ø€Ô  e¨U°EÑ:Ô:Ø€Ô˜C  s¨C°°cÑ:Ô:ñ
-ñ 
-ğ 
-ñ ;Ô:ñ ;Ô:ñ $Ô#ğ
-ğ €Ñ%Ñ&Ô&Ø€Ô˜C  c¨3°°S¸#¸sÀCÑHÔHñ\Pñ \Pğ \Pñ IÔHñ 'Ô&ğ\Pğ~ €‘ÑÔØ€Ô˜C  c¨3Ñ/Ô/ñ
-ñ 
-ğ 
-ñ 0Ô/ñ  Ôğ
-ğD €‘ÑÔØ€Ô Ñ%Ô%Ø€Ô˜C  c¨3Ñ/Ô/ñ
-Fñ 
-Fğ 
-Fñ 0Ô/ñ &Ô%ñ Ôğ
-Fğ €‘ÑÔØ€Ô Ñ%Ô%ññ ğ ñ &Ô%ñ Ôğğ €Ñ$Ñ%Ô%Ø€Ô˜C  cÑ*Ô*ñ?ñ ?ğ ?ñ +Ô*ñ &Ô%ğ?ğ €Ñ!Ñ"Ô"ñFñ Fğ Fñ #Ô"ğFğ €Ñ"Ñ#Ô#ñAñ Ağ Añ $Ô#ğAğ €Ñ"Ñ#Ô#ñ9ñ 9ğ 9ñ $Ô#ğ9ğ €Ñ!Ñ"Ô"Ø€Ô˜C  c¨3Ñ/Ô/àHMñ Tñ  Tñ  Tğ  Tñ 0Ô/ñ #Ô"ğ TğF €‘Ñ Ô ññ ğ ñ !Ô ğğ( €Ñ)Ñ*Ô*Ø€Ô˜C  c¨3Ñ/Ô/ñ#ñ #ğ #ñ 0Ô/ñ +Ô*ğ#ğ  €Ñ)Ñ*Ô*ñ$ñ $ğ $ñ +Ô*ğ$ğ" €‘ÑÔññ ğ ñ Ôğğ €‘ÑÔññ ğ ñ Ôğğ €‘ÑÔññ ğ ñ Ôğğ €‘ÑÔñYñ Yğ Yñ ÔğYğ €‘ÑÔñVñ Vğ Vñ ÔğVğ
- €‘ÑÔññ ğ ñ Ôğğ €‘ÑÔñ>ñ >ğ >ñ Ôğ>ğ* €Ñ!Ñ"Ô"Ø€Ô˜C Ñ%Ô%ñ
-
-ñ 
-
-ğ 
-
-ñ &Ô%ñ #Ô"ğ
-
-ğ €Ñ!Ñ"Ô"Ø€Ô˜C Ñ%Ô%ñ
-
-ñ 
-
-ğ 
-
-ñ &Ô%ñ #Ô"ğ
-
-ğ €‘ÑÔñCñ Cñ Cğ Cñ	 ÔğCğ €‘Ñ Ô Ø€Ô  dÑ+Ô+ñ)ñ )ğ )ñ ,Ô+ñ !Ô ğ)ğ €‘ÑÔñCñ Cñ Cğ Cñ ÔğCğ €‘Ñ Ô Ø€Ô  dÑ+Ô+ñ)ñ )ğ )ñ ,Ô+ñ !Ô ğ)ğ €‘ÑÔØ€Ô Ñ%Ô%Ø€Ô˜C  sÑ+Ô+ñCñ Cğ Cñ ,Ô+ñ &Ô%ñ ÔğCğ €‘ÑÔØ€Ô Ñ%Ô%Ø€Ô˜C  sÑ+Ô+ñCñ Cğ Cñ ,Ô+ñ &Ô%ñ ÔğCğ €‘Ñ Ô Ø€Ô Ñ%Ô%Ø€Ô˜C  cÑ*Ô*ññ ğ ñ +Ô*ñ &Ô%ñ !Ô ğğ €‘ÑÔññ ğ ñ Ôğğ €Ñ Ñ!Ô!Ø€‘Ñ Ô Ø€Ô˜C  cÑ*Ô*ññ ğ ñ +Ô*ñ !Ô ñ "Ô!ğğ €ÙØ+ˆoÔ+Ñ,BÑCÔCĞDğñ ô ğ €Ù"Ø+ˆoÔ+Ñ,JÑKÔKĞLğñ ô ğ €ÙØ+ˆoÔ+Ñ,DÑEÔEĞFğñ ô ğ €Ù!Ø+ˆoÔ+Ñ,IÑJÔJĞKğñ ô ğ €ÙØ+ˆoÔ+Ñ,AÑBÔBĞCğñ ô ğ €ÙØ+ˆoÔ+Ñ,CÑDÔDĞEğñ ô ññ ğ ñ	ô ñ	ô ñ	ô ñ	ô ñ	ô ñ	ô ğ0ğ €‘ÑÔØ€Ô˜C  d¨C°Ñ5Ô5ññ ñ ğ ñ 6Ô5ñ Ôğğ  €Ñ Ñ!Ô!Ø€Ô˜C  c¨3Ñ/Ô/ñ	5ñ 	5ğ 	5ñ 0Ô/ñ "Ô!ğ	5ğ €‘Ñ Ô Ø€Ô˜C  cÑ*Ô*ñ?ñ ?ğ ?ñ +Ô*ñ !Ô ğ?ğ €Ñ Ñ!Ô!Ø€Ô˜C  c¨3Ñ/Ô/ñFñ Fğ Fñ 0Ô/ñ "Ô!ğFğ €Ñ"Ñ#Ô#Ø€ÑFÑGÔGñGñ Gğ Gñ HÔGñ $Ô#ğGğ €Ñ"Ñ#Ô#Ø€ÑFÑGÔGñFñ Fğ Fñ HÔGñ $Ô#ğFğ €Ñ#Ñ$Ô$Ø€ÑFÑGÔGñGñ Gğ Gñ HÔGñ %Ô$ğGğ €Ñ!Ñ"Ô"Ø€ÑFÑGÔGñGñ Gğ Gñ HÔGñ #Ô"ğGğ €Ñ"Ñ#Ô#Ø€ÑFÑGÔGñGñ Gğ Gñ HÔGñ $Ô#ğGğ €Ñ"Ñ#Ô#Ø€ÑFÑGÔGñIñ Iğ Iñ HÔGñ $Ô#ğIğ €Ñ#Ñ$Ô$Ø€ÑFÑGÔGñGñ Gğ Gñ HÔGñ %Ô$ğGğ €Ñ$Ñ%Ô%Ø€ÑFÑGÔGñHñ Hğ Hñ HÔGñ &Ô%ğHğ €Ñ"Ñ#Ô#Ø€ÑFÑGÔGñFñ Fğ Fñ HÔGñ $Ô#ğFğ €‘ÑÔØ€Ô˜C  c¨3°°SÑ9Ô9ğ Øñ	>ñ 	>ñ 	>ğ 	>ñ :Ô9ñ Ôğ	>ğ €Ñ"Ñ#Ô#Ø€Ô˜C  c¨3°°SÑ9Ô9ğ ØØØØñ	Cñ 	Cñ 	Cğ 	Cñ :Ô9ñ $Ô#ğ	Cğ €Ñ!Ñ"Ô"àNSñ>ñ >ñ >ğ >ñ #Ô"ğ>ğ €Ñ%Ñ&Ô&ññ ğ ñ 'Ô&ğğ €‘ÑÔàLQñQñ Qñ Qğ Qñ  ÔğQğ6 €Ñ!Ñ"Ô"ñ*ñ *ñ *ğ *ñ #Ô"ğ*ğ €‘ÑÔØ€Ô˜C  c¨3°Ñ4Ô4ññ ñ ğ ñ 5Ô4ñ Ôğğ  €Ñ"Ñ#Ô#Ø€Ô˜C  c¨3°°SÑ9Ô9ğ ØØØØññ ñ ğ ñ :Ô9ñ $Ô#ğğ. €Ñ!Ñ"Ô"àNSñ>ñ >ñ >ğ >ñ #Ô"ğ>ğ €‘ÑÔñ+ñ +ğ +ñ Ôğ+ğ
- €‘ÑÔØ€Ô˜C  c¨3°Ñ4Ô4ññ ñ ğ ñ 5Ô4ñ Ôğğ €Ñ!Ñ"Ô"Ø€Ô˜C  c¨3°°SÑ9Ô9ğ ØØØØññ ñ ğ ñ :Ô9ñ #Ô"ğğ. €Ñ Ñ!Ô!àNSñ=ñ =ñ =ğ =ñ "Ô!ğ=ğ €‘ÑÔàOTñ
-ñ 
-ñ 
-ğ 
-ñ Ôğ
-ğ0 €Ñ!Ñ"Ô"ğ
- ØØØØñ
-ñ 
-ñ 
-ğ 
-ñ #Ô"ğ
-ğ> €Ñ Ñ!Ô!ğ ñHñ Hñ Hğ Hñ "Ô!ğHğ  €‘ÑÔñVñ Vğ Vñ ÔğVğ. €‘ÑÔñEXñ EXğ EXñ ÔğEXğP €Ñ Ñ!Ô!Ø€Ô Ñ%Ô%Ø€Ô˜C  cÑ*Ô*ññ ğ ñ +Ô*ñ &Ô%ñ "Ô!ğğ €Ñ!Ñ"Ô"Ø€Ô Ñ%Ô%Ø€Ô˜CÑ Ô ñ!ñ !ğ !ñ !Ô ñ &Ô%ñ #Ô"ğ!ğ
- €Ñ#Ñ$Ô$à€Ô ¨KÀAĞFÑFÔFØ€Ô˜CÑ Ô ñ4ñ 4ğ 4ñ !Ô ñ GÔFñ %Ô$ğ4ğ €Ñ"Ñ#Ô#Ø€Ô˜CÑ Ô ñ,ñ ,ğ ,ñ !Ô ñ $Ô#ğ,ğ €Ñ"Ñ#Ô#Ø€Ô˜C Ñ%Ô%ññ ğ ñ &Ô%ñ $Ô#ğğ( €Ñ"Ñ#Ô#Ø€Ô˜C Ñ%Ô%ñ"ñ "ğ "ñ &Ô%ñ $Ô#ğ"ğ> €‘ÑÔññ ğ ñ Ôğğ €Ñ!Ñ"Ô"Ø€Ô˜C Ñ%Ô%ñDñ Dğ Dñ &Ô%ñ #Ô"ğDğ2 €‘ÑÔà€Ô˜C  c¨6Ñ2Ô2ñCñ Cñ Cğ Cñ 3Ô2ñ ÔğCğ& €‘ÑÔñ2ñ 2ğ 2ñ Ôğ2ğ €‘ÑÔà€Ô˜C  c¨3°°VÑ<Ô<ñ<ñ <ñ <ğ <ñ =Ô<ñ Ôğ<ğ €Ñ,Ñ-Ô-ñQñ Qğ Qñ .Ô-ğQğ
- €‘
-ÑÔñGQñ GQğ GQñ ÔğGQğT €‘ÑÔñ'ñ 'ğ 'ñ  Ôğ'ğ €Ñ)Ñ*Ô*àDHñd5ñ d5ñ d5ğ d5ñ +Ô*ğd5ğN €Ñ%Ñ&Ô&Ø€Ô˜C Ñ%Ô%ñC
-ñ C
-ğ C
-ñ &Ô%ñ 'Ô&ğC
-ğL €Ñ'Ñ(Ô(Ø€Ô˜C Ñ%Ô%ñ@
-ñ @
-ğ @
-ñ &Ô%ñ )Ô(ğ@
-ğ\ Øñ_+ñ _+ñ _+ğ _+ñ _+ğD €Ô˜C  c¨3°°S¸#¸sÀCÑHÔHññ ğ ñ IÔHñğ> €Ô˜C  c¨3°°S¸#¸sÀCÑHÔHññ ğ ñ IÔHñğ> €‘ÑÔñ$ñ $ğ $ñ Ôñ$ğ €Ñ!Ñ"Ô"ñ7ñ 7ğ 7ñ #Ô"ñ7ğ4 €ÙĞ8˜?Ô8¹Ñ?Ô?ÀÀÉÁÄĞPğñ ô ğ €ÙØ+ˆoÔ+©JÑ7Ô7¸¸ÁÑ9LÔ9LĞMğñ ô ğ €ÙØ+ˆoÔ+©JÑ7Ô7¸¸ÁÑ9LÔ9LĞMğñ ô ñ?ñ ?ğ ?ñ	ô ñ	ô ñô ñ?ğD €Ñ#Ñ$Ô$Ø€Ô˜C Ñ%Ô%ñ0ñ 0ğ 0ñ &Ô%ñ %Ô$ñ0ğ €‘ÑÔññ ğ ñ  Ôñğ
- €Ñ"Ñ#Ô#Ø€Ô˜C Ñ%Ô%ññ ğ ñ &Ô%ñ $Ô#ñğ €Ñ-Ñ.Ô.Ø€Ô˜C  cÑ*Ô*ñ?ñ ?ğ ?ñ +Ô*ñ /Ô.ñ?ğ. €Ñ,Ñ-Ô-Ø€Ô˜C  c¨3°Ñ4Ô4ññ ğ ñ 5Ô4ñ .Ô-ñğ" €‘Ñ Ô ñ'ñ 'ğ 'ñ !Ô ñ'ğT €Ñ$Ñ%Ô%ññ ğ ñ &Ô%ñğ8 €‘ÑÔññ ğ ñ Ôñğ2 €‘ÑÔññ ğ ñ Ôñğ2 €Ñ"Ñ#Ô#ğ
- ØØØñKñ Kñ Kğ Kñ $Ô#ñKğ& €Ñ!Ñ"Ô"ğ
- ØØØññ ñ ğ ñ #Ô"ñğ& €‘ÑÔØ€Ô˜C  c¨3°Ñ7Ô7ñ#ñ #ğ #ñ 8Ô7ñ Ôñ#ğ €Ñ!Ñ"Ô"ñ8ñ 8ñ 8ğ 8ñ #Ô"ñ8ğ< €Ñ#Ñ$Ô$Ø€Ô˜CÑ Ô ññ ğ ñ !Ô ñ %Ô$ñğ
- €‘ÑÔØ€Ô˜CÑ Ô ññ ğ ñ !Ô ñ Ôñğ €‘Ñ Ô Ø€Ô  e¨UÑ3Ô3Ø€Ô˜C  cÑ*Ô*ñNñ Nğ Nñ +Ô*ñ 4Ô3ñ !Ô ñNğ4 €‘Ñ Ô Ø€Ô˜CÑ Ô ñ(ñ (ğ (ñ !Ô ñ !Ô ñ(ğ
- €Ñ%Ñ&Ô&ñ>ñ >ñ >ğ >ñ 'Ô&ñ>ğ €‘ÑÔØ€Ô˜CÑ Ô ññ ğ ñ !Ô ñ Ôñğ
- €‘ÑÔñYñ Yğ Yñ ÔñYğ& €‘ÑÔñ=ñ =ğ =ñ Ôñ=ğ €‘ÑÔØ€Ô˜C  c¨3Ñ/Ô/ññ ğ ñ 0Ô/ñ  Ôñğ €‘ÑÔØ€Ô˜C  cÑ*Ô*ñSñ Sğ Sñ +Ô*ñ  ÔñSğ €‘ÑÔØ€Ô˜C  cÑ*Ô*ñSñ Sğ Sñ +Ô*ñ  ÔñSğ €‘Ñ Ô Ø€Ô˜C  c¨3Ñ/Ô/ñRñ Rğ Rñ 0Ô/ñ !Ô ñRğ  €Ñ#Ñ$Ô$Ø€Ô˜C  c¨3Ñ/Ô/ñ ñ  ğ  ñ 0Ô/ñ %Ô$ñ ğ €‘ÑÔñSñ Sğ Sñ ÔñSğ
- €Ñ)Ñ*Ô*ñ;ñ ;ğ ;ñ +Ô*ñ;ğ €‘ÑÔññ ğ ñ Ôñğ €Ñ Ñ!Ô!Øñ!ñ !ğ !ñ Ôñ "Ô!ñ!ğ €‘Ñ Ô ñ@ñ @ğ @ñ !Ô ñ@ğ €‘ÑÔØ€Ô˜C  c¨3Ñ/Ô/ñQñ Qñ Qğ Qñ 0Ô/ñ  ÔñQğ" €Ô˜C  s¨CÑ0Ô0ñPñ Pğ Pñ 1Ô0ñPğ €‘ÑÔññ ğ ñ Ôñğ
- €‘ÑÔññ ğ ñ Ôñğ
- €Ñ Ñ!Ô!ñ*ñ *ğ *ñ "Ô!ñ*ğ €Ñ Ñ!Ô!ñ#ñ #ğ #ñ "Ô!ñ#ğ
- €Ñ!Ñ"Ô"Ø€Ô˜C  sÑ+Ô+ñJñ Jğ Jñ ,Ô+ñ #Ô"ñJğ €‘ÑÔñIYñ IYğ IYñ  ÔñIYğX €Ñ Ñ!Ô!ñ	5ñ 	5ğ 	5ñ "Ô!ñ	5ğ €‘ÑÔññ ğ ñ Ôñğ
- €Ñ#Ñ$Ô$ñVñ Vğ Vñ %Ô$ñVğ €Ñ$Ñ%Ô%ñ-ñ -ğ -ñ &Ô%ñ-ğ €‘ÑÔñ`Iñ `Iğ `Iñ Ôñ`IğF €Ñ#Ñ$Ô$Ø€Ô˜C  d¨C°Ñ5Ô5ñAñ Ağ Añ 6Ô5ñ %Ô$ñAğB €Ñ*Ñ+Ô+Ø€Ô˜C  d¨C°Ñ5Ô5ñYñ Yğ Yñ 6Ô5ñ ,Ô+ñYğ €Ñ*Ñ+Ô+Ø€Ô˜C  d¨C°Ñ5Ô5ñ8ñ 8ğ 8ñ 6Ô5ñ ,Ô+ñ8ğv €Ñ$Ñ%Ô%Ø€Ô˜C  cÑ*Ô*ñ'ñ 'ñ 'ğ 'ñ +Ô*ñ &Ô%ñ'ğ €Ñ&Ñ'Ô'Ø€Ô˜C  sÑ+Ô+ñ ñ  ñ  ğ  ñ ,Ô+ñ (Ô'ñ ğ €Ñ#Ñ$Ô$Ø€Ô˜C  c¨3Ñ/Ô/àPTññ ñ ğ ñ 0Ô/ñ %Ô$ñğ. €‘Ñ Ô ñ ñ  ğ  ñ !Ô ñ ğ  €Ñ Ñ!Ô!Ø€Ô˜C Ñ%Ô%ñ-ñ -ñ -ğ -ñ &Ô%ñ "Ô!ñ-ğ> €Ñ!Ñ"Ô"ñ#ñ #ğ #ñ #Ô"ñ#ğ €‘ÑÔØ€Ô˜C Ñ%Ô%ñ
-ñ 
-ñ 
-ğ 
-ñ &Ô%ñ Ôñ
-ğ4 €Ñ"Ñ#Ô#Ø€Ô  e¨U°EÑ:Ô:Ø€Ô˜C  c¨3°°SÑ9Ô9ñ7ñ 7ğ 7ñ :Ô9ñ ;Ô:ñ $Ô#ñ7ğt €Ñ$Ñ%Ô%Ø€Ô˜C  cÑ*Ô*ññ ğ ñ +Ô*ñ &Ô%ñğ. €‘ÑÔññ ğ ñ Ôñğ €Ñ#Ñ$Ô$ññ ğ ñ %Ô$ñğ& €Ñ"Ñ#Ô#ñKñ Kğ Kñ $Ô#ñKğ €‘ÑÔññ ğ ñ Ôñğ €‘ÑÔññ ğ ñ Ôñññ ğ ñ ññ ğ ñ ğ €‘ÑÔØ€Ô˜C  c¨3Ñ/Ô/ñ
-ñ 
-ğ 
-ñ 0Ô/ñ  Ôñ
-ğ$ €Ñ Ñ!Ô!Ø€Ô˜C  cÑ*Ô*ñ
-ñ 
-ğ 
-ñ +Ô*ñ "Ô!ñ
-ğ €Ñ"Ñ#Ô#Ø€Ô Ñ%Ô%Ø€Ô˜C  d¨CÑ0Ô0ñ),ñ ),ñ ),ğ ),ñ 1Ô0ñ &Ô%ñ $Ô#ñ),ğX €Ñ&Ñ'Ô'ñ8ñ 8ğ 8ñ (Ô'ñ8ğ €Ñ&Ñ'Ô'ñEñ Eğ Eñ (Ô'ñEğ €‘ÑÔññ ğ ñ  Ôñğ €Ñ#Ñ$Ô$Ø€Ô˜C  c¨3°°S¸#Ñ>Ô>ğ ØØØØØñ#ñ #ñ #ğ #ñ ?Ô>ñ %Ô$ñ#ğL €‘
-ÑÔñ ñ  ğ  ñ Ôñ ğ €‘ÑÔñ"ñ "ğ "ñ Ôñ"ğ €‘Ñ Ô Ø€Ô˜C  cÑ*Ô*ñ0ñ 0ğ 0ñ +Ô*ñ !Ô ñ0ğ@ €‘ÑÔØ€Ô˜C Ñ%Ô%ñ2ñ 2ğ 2ñ &Ô%ñ Ôñ2ğ €Ñ!Ñ"Ô"ñBHñ BHñ BHğ BHñ #Ô"ñBHğJ €‘ÑÔØ€Ô˜C  tÑ,Ô,ññ ğ ñ -Ô,ñ Ôñğ& €‘ÑÔØ€Ô˜C  cÑ*Ô*ñJñ Jñ Jğ Jñ +Ô*ñ ÔñJğ" €‘ÑÔğ
- 
-Ø6ññ ñ ğ ñ Ôññ>'ñ 'ğ 'ñ 'ğT €‘ÑÔññ ğ ñ Ôñğ( €Ñ)Ñ*Ô*ñ
-0ñ 
-0ğ 
-0ñ +Ô*ñ
-0ğ €Ñ!Ñ"Ô"ññ ñ ğ ñ #Ô"ñğ
- €Ñ%Ñ&Ô&ñ
-Pñ 
-Pğ 
-Pñ 'Ô&ñ
-Pğ" €Ñ%Ñ&Ô&ñ9ñ 9ğ 9ñ 'Ô&ñ9ğ €‘ÑÔññ ğ ñ Ôñğ €‘ÑÔññ ğ ñ Ôñğ €‘ÑÔññ ñ ğ ñ Ôñğ €‘ÑÔññ ğ ñ Ôñğ €‘ÑÔñ5ñ 5ğ 5ñ  Ôñ5ğ €Ñ%Ñ&Ô&ññ ğ ñ 'Ô&ñğ €Ñ"Ñ#Ô#ññ ğ ñ $Ô#ñğ €Ñ&Ñ'Ô'ññ ğ ñ (Ô'ñğ €Ñ%Ñ&Ô&ññ ğ ñ 'Ô&ñğ €Ñ&Ñ'Ô'ññ ğ ñ (Ô'ñğ €‘ÑÔñ?ñ ?ğ ?ñ Ôñ?ğ €‘ÑÔñ	ñ 	ğ 	ñ  Ôñ	ğ €‘ÑÔñ	ñ 	ğ 	ñ  Ôñ	ğ €‘ÑÔñ1ñ 1ğ 1ñ Ôñ1ğh €‘
-ÑÔñWñ Wğ Wñ ÔñWğt €Ñ Ñ!Ô!ññ ğ ñ "Ô!ñğD €‘ÑÔñ
-ñ 
-ğ 
-ñ Ôñ
-ğ €Ñ#Ñ$Ô$ññ ğ ñ %Ô$ñğ €Ñ$Ñ%Ô%Ø€Ñ#Ñ$Ô$ññ ğ ñ %Ô$ñ &Ô%ñğ €‘ÑÔØ€Ñ%Ñ&Ô&ñ,ñ ,ğ ,ñ 'Ô&ñ Ôñ,ğ" €‘ÑÔññ ğ ñ Ôñğ ğ r       i   n   t   e   r   m   e   d   i   a   t   e   _   r   e   f   e   r   e   n   c   e   _   p   o   i   n   t   s   =   i   n   t   e   r   m   e   d   i   a   t   e   _   r   e   f   e   r   e   n   c   e   _   p   o   i   n   t   s   ,   
-                                                   i   n   t   e   r   m   e   d   i   a   t   e   _   p   r   e   d   i   c   t   e   d   _   c   o   r   n   e   r   s   =   i   n   t   e   r   m   e   d   i   a   t   e   _   p   r   e   d   i   c   t   e   d   _   c   o   r   n   e   r   s   ,   
-                                                   i   n   i   t   i   a   l   _   r   e   f   e   r   e   n   c   e   _   p   o   i   n   t   s   =   i   n   i   t   i   a   l   _   r   e   f   e   r   e   n   c   e   _   p   o   i   n   t   s   ,   
-                                                   h   i   d   d   e   n   _   s   t   a   t   e   s   =   a   l   l   _   h   i   d   d   e   n   _   s   t   a   t   e   s   ,   
-                                                   a   t   t   e   n   t   i   o   n   s   =   a   l   l   _   s   e   l   f   _   a   t   t   n   s   ,   
-                                                   c   r   o   s   s   _   a   t   t   e   n   t   i   o   n   s   =   a   l   l   _   c   r   o   s   s   _   a   t   t   e   n   t   i   o   n   s   ,   
-                                   )   
-   
-   
-   @   d   a   t   a   c   l   a   s   s   
-   @   a   u   t   o   _   d   o   c   s   t   r   i   n   g   (   
-                   c   u   s   t   o   m   _   i   n   t   r   o   =   "   "   "   
-                   B   a   s   e       c   l   a   s   s       f   o   r       o   u   t   p   u   t   s       o   f       t   h   e       R   T   -   D   E   T   R       e   n   c   o   d   e   r   -   d   e   c   o   d   e   r       m   o   d   e   l   .   
-                   "   "   "   
-   )   
-   c   l   a   s   s       D   F   i   n   e   M   o   d   e   l   O   u   t   p   u   t   (   M   o   d   e   l   O   u   t   p   u   t   )   :   
-                   r   "   "   "   
-                   l   a   s   t   _   h   i   d   d   e   n   _   s   t   a   t   e       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       n   u   m   _   q   u   e   r   i   e   s   ,       h   i   d   d   e   n   _   s   i   z   e   )   `   )   :   
-                                   S   e   q   u   e   n   c   e       o   f       h   i   d   d   e   n   -   s   t   a   t   e   s       a   t       t   h   e       o   u   t   p   u   t       o   f       t   h   e       l   a   s   t       l   a   y   e   r       o   f       t   h   e       d   e   c   o   d   e   r       o   f       t   h   e       m   o   d   e   l   .   
-                   i   n   t   e   r   m   e   d   i   a   t   e   _   h   i   d   d   e   n   _   s   t   a   t   e   s       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       c   o   n   f   i   g   .   d   e   c   o   d   e   r   _   l   a   y   e   r   s   ,       n   u   m   _   q   u   e   r   i   e   s   ,       h   i   d   d   e   n   _   s   i   z   e   )   `   )   :   
-                                   S   t   a   c   k   e   d       i   n   t   e   r   m   e   d   i   a   t   e       h   i   d   d   e   n       s   t   a   t   e   s       (   o   u   t   p   u   t       o   f       e   a   c   h       l   a   y   e   r       o   f       t   h   e       d   e   c   o   d   e   r   )   .   
-                   i   n   t   e   r   m   e   d   i   a   t   e   _   l   o   g   i   t   s       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       c   o   n   f   i   g   .   d   e   c   o   d   e   r   _   l   a   y   e   r   s   ,       s   e   q   u   e   n   c   e   _   l   e   n   g   t   h   ,       c   o   n   f   i   g   .   n   u   m   _   l   a   b   e   l   s   )   `   )   :   
-                                   S   t   a   c   k   e   d       i   n   t   e   r   m   e   d   i   a   t   e       l   o   g   i   t   s       (   l   o   g   i   t   s       o   f       e   a   c   h       l   a   y   e   r       o   f       t   h   e       d   e   c   o   d   e   r   )   .   
-                   i   n   t   e   r   m   e   d   i   a   t   e   _   r   e   f   e   r   e   n   c   e   _   p   o   i   n   t   s       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       c   o   n   f   i   g   .   d   e   c   o   d   e   r   _   l   a   y   e   r   s   ,       n   u   m   _   q   u   e   r   i   e   s   ,       4   )   `   )   :   
-                                   S   t   a   c   k   e   d       i   n   t   e   r   m   e   d   i   a   t   e       r   e   f   e   r   e   n   c   e       p   o   i   n   t   s       (   r   e   f   e   r   e   n   c   e       p   o   i   n   t   s       o   f       e   a   c   h       l   a   y   e   r       o   f       t   h   e       d   e   c   o   d   e   r   )   .   
-                   i   n   t   e   r   m   e   d   i   a   t   e   _   p   r   e   d   i   c   t   e   d   _   c   o   r   n   e   r   s       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       c   o   n   f   i   g   .   d   e   c   o   d   e   r   _   l   a   y   e   r   s   ,       n   u   m   _   q   u   e   r   i   e   s   ,       4   )   `   )   :   
-                                   S   t   a   c   k   e   d       i   n   t   e   r   m   e   d   i   a   t   e       p   r   e   d   i   c   t   e   d       c   o   r   n   e   r   s       (   p   r   e   d   i   c   t   e   d       c   o   r   n   e   r   s       o   f       e   a   c   h       l   a   y   e   r       o   f       t   h   e       d   e   c   o   d   e   r   )   .   
-                   i   n   i   t   i   a   l   _   r   e   f   e   r   e   n   c   e   _   p   o   i   n   t   s       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       n   u   m   _   q   u   e   r   i   e   s   ,       4   )   `   )   :   
-                                   I   n   i   t   i   a   l       r   e   f   e   r   e   n   c   e       p   o   i   n   t   s       u   s   e   d       f   o   r       t   h   e       f   i   r   s   t       d   e   c   o   d   e   r       l   a   y   e   r   .   
-                   i   n   i   t   _   r   e   f   e   r   e   n   c   e   _   p   o   i   n   t   s       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       n   u   m   _   q   u   e   r   i   e   s   ,       4   )   `   )   :   
-                                   I   n   i   t   i   a   l       r   e   f   e   r   e   n   c   e       p   o   i   n   t   s       s   e   n   t       t   h   r   o   u   g   h       t   h   e       T   r   a   n   s   f   o   r   m   e   r       d   e   c   o   d   e   r   .   
-                   e   n   c   _   t   o   p   k   _   l   o   g   i   t   s       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       s   e   q   u   e   n   c   e   _   l   e   n   g   t   h   ,       c   o   n   f   i   g   .   n   u   m   _   l   a   b   e   l   s   )   `   )   :   
-                                   P   r   e   d   i   c   t   e   d       b   o   u   n   d   i   n   g       b   o   x   e   s       s   c   o   r   e   s       w   h   e   r   e       t   h   e       t   o   p       `   c   o   n   f   i   g   .   t   w   o   _   s   t   a   g   e   _   n   u   m   _   p   r   o   p   o   s   a   l   s   `       s   c   o   r   i   n   g       b   o   u   n   d   i   n   g       b   o   x   e   s       a   r   e   
-                                   p   i   c   k   e   d       a   s       r   e   g   i   o   n       p   r   o   p   o   s   a   l   s       i   n       t   h   e       e   n   c   o   d   e   r       s   t   a   g   e   .       O   u   t   p   u   t       o   f       b   o   u   n   d   i   n   g       b   o   x       b   i   n   a   r   y       c   l   a   s   s   i   f   i   c   a   t   i   o   n       (   i   .   e   .   
-                                   f   o   r   e   g   r   o   u   n   d       a   n   d       b   a   c   k   g   r   o   u   n   d   )   .   
-                   e   n   c   _   t   o   p   k   _   b   b   o   x   e   s       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       s   e   q   u   e   n   c   e   _   l   e   n   g   t   h   ,       4   )   `   )   :   
-                                   L   o   g   i   t   s       o   f       p   r   e   d   i   c   t   e   d       b   o   u   n   d   i   n   g       b   o   x   e   s       c   o   o   r   d   i   n   a   t   e   s       i   n       t   h   e       e   n   c   o   d   e   r       s   t   a   g   e   .   
-                   e   n   c   _   o   u   t   p   u   t   s   _   c   l   a   s   s       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       s   e   q   u   e   n   c   e   _   l   e   n   g   t   h   ,       c   o   n   f   i   g   .   n   u   m   _   l   a   b   e   l   s   )   `   ,       *   o   p   t   i   o   n   a   l   *   ,       r   e   t   u   r   n   e   d       w   h   e   n       `   c   o   n   f   i   g   .   w   i   t   h   _   b   o   x   _   r   e   f   i   n   e   =   T   r   u   e   `       a   n   d       `   c   o   n   f   i   g   .   t   w   o   _   s   t   a   g   e   =   T   r   u   e   `   )   :   
-                                   P   r   e   d   i   c   t   e   d       b   o   u   n   d   i   n   g       b   o   x   e   s       s   c   o   r   e   s       w   h   e   r   e       t   h   e       t   o   p       `   c   o   n   f   i   g   .   t   w   o   _   s   t   a   g   e   _   n   u   m   _   p   r   o   p   o   s   a   l   s   `       s   c   o   r   i   n   g       b   o   u   n   d   i   n   g       b   o   x   e   s       a   r   e   
-                                   p   i   c   k   e   d       a   s       r   e   g   i   o   n       p   r   o   p   o   s   a   l   s       i   n       t   h   e       f   i   r   s   t       s   t   a   g   e   .       O   u   t   p   u   t       o   f       b   o   u   n   d   i   n   g       b   o   x       b   i   n   a   r   y       c   l   a   s   s   i   f   i   c   a   t   i   o   n       (   i   .   e   .   
-                                   f   o   r   e   g   r   o   u   n   d       a   n   d       b   a   c   k   g   r   o   u   n   d   )   .   
-                   e   n   c   _   o   u   t   p   u   t   s   _   c   o   o   r   d   _   l   o   g   i   t   s       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `       o   f       s   h   a   p   e       `   (   b   a   t   c   h   _   s   i   z   e   ,       s   e   q   u   e   n   c   e   _   l   e   n   g   t   h   ,       4   )   `   ,       *   o   p   t   i   o   n   a   l   *   ,       r   e   t   u   r   n   e   d       w   h   e   n       `   c   o   n   f   i   g   .   w   i   t   h   _   b   o   x   _   r   e   f   i   n   e   =   T   r   u   e   `       a   n   d       `   c   o   n   f   i   g   .   t   w   o   _   s   t   a   g   e   =   T   r   u   e   `   )   :   
-                                   L   o   g   i   t   s       o   f       p   r   e   d   i   c   t   e   d       b   o   u   n   d   i   n   g       b   o   x   e   s       c   o   o   r   d   i   n   a   t   e   s       i   n       t   h   e       f   i   r   s   t       s   t   a   g   e   .   
-                   d   e   n   o   i   s   i   n   g   _   m   e   t   a   _   v   a   l   u   e   s       (   `   d   i   c   t   `   )   :   
-                                   E   x   t   r   a       d   i   c   t   i   o   n   a   r   y       f   o   r       t   h   e       d   e   n   o   i   s   i   n   g       r   e   l   a   t   e   d       v   a   l   u   e   s   .   
-                   "   "   "   
-   
-                   l   a   s   t   _   h   i   d   d   e   n   _   s   t   a   t   e   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   i   n   t   e   r   m   e   d   i   a   t   e   _   h   i   d   d   e   n   _   s   t   a   t   e   s   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   i   n   t   e   r   m   e   d   i   a   t   e   _   l   o   g   i   t   s   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   i   n   t   e   r   m   e   d   i   a   t   e   _   r   e   f   e   r   e   n   c   e   _   p   o   i   n   t   s   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   i   n   t   e   r   m   e   d   i   a   t   e   _   p   r   e   d   i   c   t   e   d   _   c   o   r   n   e   r   s   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   i   n   i   t   i   a   l   _   r   e   f   e   r   e   n   c   e   _   p   o   i   n   t   s   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   d   e   c   o   d   e   r   _   h   i   d   d   e   n   _   s   t   a   t   e   s   :       O   p   t   i   o   n   a   l   [   t   u   p   l   e   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]   ]       =       N   o   n   e   
-                   d   e   c   o   d   e   r   _   a   t   t   e   n   t   i   o   n   s   :       O   p   t   i   o   n   a   l   [   t   u   p   l   e   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]   ]       =       N   o   n   e   
-                   c   r   o   s   s   _   a   t   t   e   n   t   i   o   n   s   :       O   p   t   i   o   n   a   l   [   t   u   p   l   e   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]   ]       =       N   o   n   e   
-                   e   n   c   o   d   e   r   _   l   a   s   t   _   h   i   d   d   e   n   _   s   t   a   t   e   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   e   n   c   o   d   e   r   _   h   i   d   d   e   n   _   s   t   a   t   e   s   :       O   p   t   i   o   n   a   l   [   t   u   p   l   e   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]   ]       =       N   o   n   e   
-                   e   n   c   o   d   e   r   _   a   t   t   e   n   t   i   o   n   s   :       O   p   t   i   o   n   a   l   [   t   u   p   l   e   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]   ]       =       N   o   n   e   
-                   i   n   i   t   _   r   e   f   e   r   e   n   c   e   _   p   o   i   n   t   s   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   e   n   c   _   t   o   p   k   _   l   o   g   i   t   s   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   e   n   c   _   t   o   p   k   _   b   b   o   x   e   s   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   e   n   c   _   o   u   t   p   u   t   s   _   c   l   a   s   s   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   e   n   c   _   o   u   t   p   u   t   s   _   c   o   o   r   d   _   l   o   g   i   t   s   :       O   p   t   i   o   n   a   l   [   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   ]       =       N   o   n   e   
-                   d   e   n   o   i   s   i   n   g   _   m   e   t   a   _   v   a   l   u   e   s   :       O   p   t   i   o   n   a   l   [   d   i   c   t   ]       =       N   o   n   e   
-   
-   
-   c   l   a   s   s       D   F   i   n   e   F   r   o   z   e   n   B   a   t   c   h   N   o   r   m   2   d   (   n   n   .   M   o   d   u   l   e   )   :   
-                   "   "   "   
-                   B   a   t   c   h   N   o   r   m   2   d       w   h   e   r   e       t   h   e       b   a   t   c   h       s   t   a   t   i   s   t   i   c   s       a   n   d       t   h   e       a   f   f   i   n   e       p   a   r   a   m   e   t   e   r   s       a   r   e       f   i   x   e   d   .   
-   
-                   C   o   p   y   -   p   a   s   t   e       f   r   o   m       t   o   r   c   h   v   i   s   i   o   n   .   m   i   s   c   .   o   p   s       w   i   t   h       a   d   d   e   d       e   p   s       b   e   f   o   r   e       r   q   s   r   t   ,       w   i   t   h   o   u   t       w   h   i   c   h       a   n   y       o   t   h   e   r       m   o   d   e   l   s       t   h   a   n   
-                   t   o   r   c   h   v   i   s   i   o   n   .   m   o   d   e   l   s   .   r   e   s   n   e   t   [   1   8   ,   3   4   ,   5   0   ,   1   0   1   ]       p   r   o   d   u   c   e       n   a   n   s   .   
-                   "   "   "   
-   
-                   d   e   f       _   _   i   n   i   t   _   _   (   s   e   l   f   ,       n   )   :   
-                                   s   u   p   e   r   (   )   .   _   _   i   n   i   t   _   _   (   )   
-                                   s   e   l   f   .   r   e   g   i   s   t   e   r   _   b   u   f   f   e   r   (   "   w   e   i   g   h   t   "   ,       t   o   r   c   h   .   o   n   e   s   (   n   )   )   
-                                   s   e   l   f   .   r   e   g   i   s   t   e   r   _   b   u   f   f   e   r   (   "   b   i   a   s   "   ,       t   o   r   c   h   .   z   e   r   o   s   (   n   )   )   
-                                   s   e   l   f   .   r   e   g   i   s   t   e   r   _   b   u   f   f   e   r   (   "   r   u   n   n   i   n   g   _   m   e   a   n   "   ,       t   o   r   c   h   .   z   e   r   o   s   (   n   )   )   
-                                   s   e   l   f   .   r   e   g   i   s   t   e   r   _   b   u   f   f   e   r   (   "   r   u   n   n   i   n   g   _   v   a   r   "   ,       t   o   r   c   h   .   o   n   e   s   (   n   )   )   
-   
-                   d   e   f       _   l   o   a   d   _   f   r   o   m   _   s   t   a   t   e   _   d   i   c   t   (   
-                                   s   e   l   f   ,       s   t   a   t   e   _   d   i   c   t   ,       p   r   e   f   i   x   ,       l   o   c   a   l   _   m   e   t   a   d   a   t   a   ,       s   t   r   i   c   t   ,       m   i   s   s   i   n   g   _   k   e   y   s   ,       u   n   e   x   p   e   c   t   e   d   _   k   e   y   s   ,       e   r   r   o   r   _   m   s   g   s   
-                   )   :   
-                                   n   u   m   _   b   a   t   c   h   e   s   _   t   r   a   c   k   e   d   _   k   e   y       =       p   r   e   f   i   x       +       "   n   u   m   _   b   a   t   c   h   e   s   _   t   r   a   c   k   e   d   "   
-                                   i   f       n   u   m   _   b   a   t   c   h   e   s   _   t   r   a   c   k   e   d   _   k   e   y       i   n       s   t   a   t   e   _   d   i   c   t   :   
-                                                   d   e   l       s   t   a   t   e   _   d   i   c   t   [   n   u   m   _   b   a   t   c   h   e   s   _   t   r   a   c   k   e   d   _   k   e   y   ]   
-   
-                                   s   u   p   e   r   (   )   .   _   l   o   a   d   _   f   r   o   m   _   s   t   a   t   e   _   d   i   c   t   (   
-                                                   s   t   a   t   e   _   d   i   c   t   ,       p   r   e   f   i   x   ,       l   o   c   a   l   _   m   e   t   a   d   a   t   a   ,       s   t   r   i   c   t   ,       m   i   s   s   i   n   g   _   k   e   y   s   ,       u   n   e   x   p   e   c   t   e   d   _   k   e   y   s   ,       e   r   r   o   r   _   m   s   g   s   
-                                   )   
-   
-                   d   e   f       f   o   r   w   a   r   d   (   s   e   l   f   ,       x   )   :   
-                                   #       m   o   v   e       r   e   s   h   a   p   e   s       t   o       t   h   e       b   e   g   i   n   n   i   n   g   
-                                   #       t   o       m   a   k   e       i   t       u   s   e   r   -   f   r   i   e   n   d   l   y   
-                                   w   e   i   g   h   t       =       s   e   l   f   .   w   e   i   g   h   t   .   r   e   s   h   a   p   e   (   1   ,       -   1   ,       1   ,       1   )   
-                                   b   i   a   s       =       s   e   l   f   .   b   i   a   s   .   r   e   s   h   a   p   e   (   1   ,       -   1   ,       1   ,       1   )   
-                                   r   u   n   n   i   n   g   _   v   a   r       =       s   e   l   f   .   r   u   n   n   i   n   g   _   v   a   r   .   r   e   s   h   a   p   e   (   1   ,       -   1   ,       1   ,       1   )   
-                                   r   u   n   n   i   n   g   _   m   e   a   n       =       s   e   l   f   .   r   u   n   n   i   n   g   _   m   e   a   n   .   r   e   s   h   a   p   e   (   1   ,       -   1   ,       1   ,       1   )   
-                                   e   p   s   i   l   o   n       =       1   e   -   5   
-                                   s   c   a   l   e       =       w   e   i   g   h   t       *       (   r   u   n   n   i   n   g   _   v   a   r       +       e   p   s   i   l   o   n   )   .   r   s   q   r   t   (   )   
-                                   b   i   a   s       =       b   i   a   s       -       r   u   n   n   i   n   g   _   m   e   a   n       *       s   c   a   l   e   
-                                   r   e   t   u   r   n       x       *       s   c   a   l   e       +       b   i   a   s   
-   
-   
-   d   e   f       r   e   p   l   a   c   e   _   b   a   t   c   h   _   n   o   r   m   (   m   o   d   e   l   )   :   
-                   r   "   "   "   
-                   R   e   c   u   r   s   i   v   e   l   y       r   e   p   l   a   c   e       a   l   l       `   t   o   r   c   h   .   n   n   .   B   a   t   c   h   N   o   r   m   2   d   `       w   i   t   h       `   D   F   i   n   e   F   r   o   z   e   n   B   a   t   c   h   N   o   r   m   2   d   `   .   
-   
-                   A   r   g   s   :   
-                                   m   o   d   e   l       (   t   o   r   c   h   .   n   n   .   M   o   d   u   l   e   )   :   
-                                                   i   n   p   u   t       m   o   d   e   l   
-                   "   "   "   
-                   f   o   r       n   a   m   e   ,       m   o   d   u   l   e       i   n       m   o   d   e   l   .   n   a   m   e   d   _   c   h   i   l   d   r   e   n   (   )   :   
-                                   i   f       i   s   i   n   s   t   a   n   c   e   (   m   o   d   u   l   e   ,       n   n   .   B   a   t   c   h   N   o   r   m   2   d   )   :   
-                                                   n   e   w   _   m   o   d   u   l   e       =       D   F   i   n   e   F   r   o   z   e   n   B   a   t   c   h   N   o   r   m   2   d   (   m   o   d   u   l   e   .   n   u   m   _   f   e   a   t   u   r   e   s   )   
-   
-                                                   i   f       m   o   d   u   l   e   .   w   e   i   g   h   t   .   d   e   v   i   c   e       !   =       t   o   r   c   h   .   d   e   v   i   c   e   (   "   m   e   t   a   "   )   :   
-                                                                   n   e   w   _   m   o   d   u   l   e   .   w   e   i   g   h   t   .   d   a   t   a   .   c   o   p   y   _   (   m   o   d   u   l   e   .   w   e   i   g   h   t   )   
-                                                                   n   e   w   _   m   o   d   u   l   e   .   b   i   a   s   .   d   a   t   a   .   c   o   p   y   _   (   m   o   d   u   l   e   .   b   i   a   s   )   
-                                                                   n   e   w   _   m   o   d   u   l   e   .   r   u   n   n   i   n   g   _   m   e   a   n   .   d   a   t   a   .   c   o   p   y   _   (   m   o   d   u   l   e   .   r   u   n   n   i   n   g   _   m   e   a   n   )   
-                                                                   n   e   w   _   m   o   d   u   l   e   .   r   u   n   n   i   n   g   _   v   a   r   .   d   a   t   a   .   c   o   p   y   _   (   m   o   d   u   l   e   .   r   u   n   n   i   n   g   _   v   a   r   )   
-   
-                                                   m   o   d   e   l   .   _   m   o   d   u   l   e   s   [   n   a   m   e   ]       =       n   e   w   _   m   o   d   u   l   e   
-   
-                                   i   f       l   e   n   (   l   i   s   t   (   m   o   d   u   l   e   .   c   h   i   l   d   r   e   n   (   )   )   )       >       0   :   
-                                                   r   e   p   l   a   c   e   _   b   a   t   c   h   _   n   o   r   m   (   m   o   d   u   l   e   )   
-   
-   
-   c   l   a   s   s       D   F   i   n   e   C   o   n   v   E   n   c   o   d   e   r   (   n   n   .   M   o   d   u   l   e   )   :   
-                   "   "   "   
-                   C   o   n   v   o   l   u   t   i   o   n   a   l       b   a   c   k   b   o   n   e       u   s   i   n   g       t   h   e       m   o   d   e   l   i   n   g   _   d   _   f   i   n   e   _   r   e   s   n   e   t   .   p   y   .   
-   
-                   n   n   .   B   a   t   c   h   N   o   r   m   2   d       l   a   y   e   r   s       a   r   e       r   e   p   l   a   c   e   d       b   y       D   F   i   n   e   F   r   o   z   e   n   B   a   t   c   h   N   o   r   m   2   d       a   s       d   e   f   i   n   e   d       a   b   o   v   e   .   
-                   h   t   t   p   s   :   /   /   g   i   t   h   u   b   .   c   o   m   /   l   y   u   w   e   n   y   u   /   R   T   -   D   E   T   R   /   b   l   o   b   /   m   a   i   n   /   D   F   i   n   e   _   p   y   t   o   r   c   h   /   s   r   c   /   n   n   /   b   a   c   k   b   o   n   e   /   p   r   e   s   n   e   t   .   p   y   #   L   1   4   2   
-                   "   "   "   
-   
-                   d   e   f       _   _   i   n   i   t   _   _   (   s   e   l   f   ,       c   o   n   f   i   g   )   :   
-                                   s   u   p   e   r   (   )   .   _   _   i   n   i   t   _   _   (   )   
-   
-                                   b   a   c   k   b   o   n   e       =       l   o   a   d   _   b   a   c   k   b   o   n   e   (   c   o   n   f   i   g   )   
-   
-                                   i   f       c   o   n   f   i   g   .   f   r   e   e   z   e   _   b   a   c   k   b   o   n   e   _   b   a   t   c   h   _   n   o   r   m   s   :   
-                                                   #       r   e   p   l   a   c   e       b   a   t   c   h       n   o   r   m       b   y       f   r   o   z   e   n       b   a   t   c   h       n   o   r   m   
-                                                   w   i   t   h       t   o   r   c   h   .   n   o   _   g   r   a   d   (   )   :   
-                                                                   r   e   p   l   a   c   e   _   b   a   t   c   h   _   n   o   r   m   (   b   a   c   k   b   o   n   e   )   
-                                   s   e   l   f   .   m   o   d   e   l       =       b   a   c   k   b   o   n   e   
-                                   s   e   l   f   .   i   n   t   e   r   m   e   d   i   a   t   e   _   c   h   a   n   n   e   l   _   s   i   z   e   s       =       s   e   l   f   .   m   o   d   e   l   .   c   h   a   n   n   e   l   s   
-   
-                   d   e   f       f   o   r   w   a   r   d   (   s   e   l   f   ,       p   i   x   e   l   _   v   a   l   u   e   s   :       t   o   r   c   h   .   T   e   n   s   o   r   ,       p   i   x   e   l   _   m   a   s   k   :       t   o   r   c   h   .   T   e   n   s   o   r   )   :   
-                                   #       s   e   n   d       p   i   x   e   l   _   v   a   l   u   e   s       t   h   r   o   u   g   h       t   h   e       m   o   d   e   l       t   o       g   e   t       l   i   s   t       o   f       f   e   a   t   u   r   e       m   a   p   s   
-                                   f   e   a   t   u   r   e   s       =       s   e   l   f   .   m   o   d   e   l   (   p   i   x   e   l   _   v   a   l   u   e   s   )   .   f   e   a   t   u   r   e   _   m   a   p   s   
-   
-                                   o   u   t       =       [   ]   
-                                   f   o   r       f   e   a   t   u   r   e   _   m   a   p       i   n       f   e   a   t   u   r   e   s   :   
-                                                   #       d   o   w   n   s   a   m   p   l   e       p   i   x   e   l   _   m   a   s   k       t   o       m   a   t   c   h       s   h   a   p   e       o   f       c   o   r   r   e   s   p   o   n   d   i   n   g       f   e   a   t   u   r   e   _   m   a   p   
-                                                   m   a   s   k       =       n   n   .   f   u   n   c   t   i   o   n   a   l   .   i   n   t   e   r   p   o   l   a   t   e   (   p   i   x   e   l   _   m   a   s   k   [   N   o   n   e   ]   .   f   l   o   a   t   (   )   ,       s   i   z   e   =   f   e   a   t   u   r   e   _   m   a   p   .   s   h   a   p   e   [   -   2   :   ]   )   .   t   o   (   t   o   r   c   h   .   b   o   o   l   )   [   0   ]   
-                                                   o   u   t   .   a   p   p   e   n   d   (   (   f   e   a   t   u   r   e   _   m   a   p   ,       m   a   s   k   )   )   
-                                   r   e   t   u   r   n       o   u   t   
-   
-   
-   d   e   f       g   e   t   _   c   o   n   t   r   a   s   t   i   v   e   _   d   e   n   o   i   s   i   n   g   _   t   r   a   i   n   i   n   g   _   g   r   o   u   p   (   
-                   t   a   r   g   e   t   s   ,   
-                   n   u   m   _   c   l   a   s   s   e   s   ,   
-                   n   u   m   _   q   u   e   r   i   e   s   ,   
-                   c   l   a   s   s   _   e   m   b   e   d   ,   
-                   n   u   m   _   d   e   n   o   i   s   i   n   g   _   q   u   e   r   i   e   s   =   1   0   0   ,   
-                   l   a   b   e   l   _   n   o   i   s   e   _   r   a   t   i   o   =   0   .   5   ,   
-                   b   o   x   _   n   o   i   s   e   _   s   c   a   l   e   =   1   .   0   ,   
-   )   :   
-                   "   "   "   
-                   C   r   e   a   t   e   s       a       c   o   n   t   r   a   s   t   i   v   e       d   e   n   o   i   s   i   n   g       t   r   a   i   n   i   n   g       g   r   o   u   p       u   s   i   n   g       g   r   o   u   n   d   -   t   r   u   t   h       s   a   m   p   l   e   s   .       I   t       a   d   d   s       n   o   i   s   e       t   o       l   a   b   e   l   s       a   n   d       b   o   x   e   s   .   
-   
-                   A   r   g   s   :   
-                                   t   a   r   g   e   t   s       (   `   l   i   s   t   [   d   i   c   t   ]   `   )   :   
-                                                   T   h   e       t   a   r   g   e   t       o   b   j   e   c   t   s   ,       e   a   c   h       c   o   n   t   a   i   n   i   n   g       '   c   l   a   s   s   _   l   a   b   e   l   s   '       a   n   d       '   b   o   x   e   s   '       f   o   r       o   b   j   e   c   t   s       i   n       a   n       i   m   a   g   e   .   
-                                   n   u   m   _   c   l   a   s   s   e   s       (   `   i   n   t   `   )   :   
-                                                   T   o   t   a   l       n   u   m   b   e   r       o   f       c   l   a   s   s   e   s       i   n       t   h   e       d   a   t   a   s   e   t   .   
-                                   n   u   m   _   q   u   e   r   i   e   s       (   `   i   n   t   `   )   :   
-                                                   N   u   m   b   e   r       o   f       q   u   e   r   y       s   l   o   t   s       i   n       t   h   e       t   r   a   n   s   f   o   r   m   e   r   .   
-                                   c   l   a   s   s   _   e   m   b   e   d       (   `   c   a   l   l   a   b   l   e   `   )   :   
-                                                   A       f   u   n   c   t   i   o   n       o   r       a       m   o   d   e   l       l   a   y   e   r       t   o       e   m   b   e   d       c   l   a   s   s       l   a   b   e   l   s   .   
-                                   n   u   m   _   d   e   n   o   i   s   i   n   g   _   q   u   e   r   i   e   s       (   `   i   n   t   `   ,       *   o   p   t   i   o   n   a   l   *   ,       d   e   f   a   u   l   t   s       t   o       1   0   0   )   :   
-                                                   N   u   m   b   e   r       o   f       d   e   n   o   i   s   i   n   g       q   u   e   r   i   e   s   .   
-                                   l   a   b   e   l   _   n   o   i   s   e   _   r   a   t   i   o       (   `   f   l   o   a   t   `   ,       *   o   p   t   i   o   n   a   l   *   ,       d   e   f   a   u   l   t   s       t   o       0   .   5   )   :   
-                                                   R   a   t   i   o       o   f       n   o   i   s   e       a   p   p   l   i   e   d       t   o       l   a   b   e   l   s   .   
-                                   b   o   x   _   n   o   i   s   e   _   s   c   a   l   e       (   `   f   l   o   a   t   `   ,       *   o   p   t   i   o   n   a   l   *   ,       d   e   f   a   u   l   t   s       t   o       1   .   0   )   :   
-                                                   S   c   a   l   e       o   f       n   o   i   s   e       a   p   p   l   i   e   d       t   o       b   o   u   n   d   i   n   g       b   o   x   e   s   .   
-                   R   e   t   u   r   n   s   :   
-                                   `   t   u   p   l   e   `       c   o   m   p   r   i   s   i   n   g       v   a   r   i   o   u   s       e   l   e   m   e   n   t   s   :   
-                                   -       *   *   i   n   p   u   t   _   q   u   e   r   y   _   c   l   a   s   s   *   *       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `   )       -   -   
-                                           C   l   a   s   s       q   u   e   r   i   e   s       w   i   t   h       a   p   p   l   i   e   d       l   a   b   e   l       n   o   i   s   e   .   
-                                   -       *   *   i   n   p   u   t   _   q   u   e   r   y   _   b   b   o   x   *   *       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `   )       -   -   
-                                           B   o   u   n   d   i   n   g       b   o   x       q   u   e   r   i   e   s       w   i   t   h       a   p   p   l   i   e   d       b   o   x       n   o   i   s   e   .   
-                                   -       *   *   a   t   t   n   _   m   a   s   k   *   *       (   `   t   o   r   c   h   .   F   l   o   a   t   T   e   n   s   o   r   `   )       -   -   
-                                               A   t   t   e   n   t   i   o   n       m   a   s   k       f   o   r       s   e   p   a   r   a   t   i   n   g       d   e   n   o   i   s   i   n   g       a   n   d       r   e   c   o   n   s   t   r   u   c   t   i   o   n       q   u   e   r   i   e   s   .   
-                                   -       *   *   d   e   n   o   i   s   i   n   g   _   m   e   t   a   _   v   a   l   u   e   s   *   *       (   `   d   i   c   t   `   )       -   -   
-                                           M   e   t   a   d   a   t   a       i   n   c   l   u   d   i   n   g       d   e   n   o   i   s   i   n   g       p   o   s   i   t   i   v   e       i   n   d   i   c   e   s   ,       n   u   m   b   e   r       o   f       g   r   o   u   p   s   ,       a   n   d       s   p   l   i   t       s   i   z   e   s   .   
-                   "   "   "   
-   
-                   i   f       n   u   m   _   d   e   n   o   i   s   i   n   g   _   q   u   e   r   i   e   s       <   =       0   :   
-                                   r   e   t   u   r   n       N   o   n   e   ,       N   o   n   e   ,       N   o   n   e   ,       N   o   n   e   
-   
-                   n   u   m   _   g   r   o   u   n   d   _   t   r   u   t   h   s       =       [   l   e   n   (   t   [   "   c   l   a   s   s   _   l   a   b   e   l   s   "   ]   )       f   o   r       t       i   n       t   a   r   g   e   t   s   ]   
-                   d   e   v   i   c   e       =       t   a   r   g   e   t   s   [   0   ]   [   "   c   l   a   s   s   _   l   a   b   e   l   s   "   ]   .   d   e   v   i   c   e   
-   
-                   m   a   x   _   g   t   _   n   u   m       =       m   a   x   (   n   u   m   _   g   r   o   u   n   d   _   t   r   u   t   h   s   )   
-                   i   f       m   a   x   _   g   t   _   n   u   m       =   =       0   :   
-                                   r   e   t   u   r   n       N   o   n   e   ,       N   o   n   e   ,       N   o   n   e   ,       N   o   n   e   
-   
-                   n   u   m   _   g   r   o   u   p   s   _   d   e   n   o   i   s   i   n   g   _   q   u   e   r   i   e   s       =       n   u   m   _   d   e   n   o   i   s   i   n   g   _   q   u   e   r   i   e   s       /   /       m   a   x   _   g   t   _   n   u   m   
-                   n   u   m   _   g   r   o   u   p   s   _   d   e   n   o   i   s   i   n   g   _   q   u   e   r   i   e   s       =       1       i   f       n   u   m   _   g   r   o   u   p   s   _   d   e   n   o   i   s   i   n   g   _   q   u   e   r   i   e   s       =   =       0       e   l   s   e       n   u   m   _   g   r   o   u   p   s   _   d   e   n   o   i   s   i   n   g   _   q   u   e   r   i   e   s   
-                   #       p   a   d       g   t       t   o       m   a   x   _   n   u   m       o   f       a       b   a   t   c   h   
-                   b   a   t   c   h   _   s   i   z   e       =       l   e   n   (   n   u   m   _   g   r   o   u   n   d   _   t   r   u   t   h   s   )   
-   
-                   i   n   p   u   t   _   q   u   e   r   y   _   c   l   a   s   s       =       t   o   r   c   h   .   f   u   l   l   (   [   b   a   t   c   h   _   s   i   z   e   ,       m   a   x   _   g   t   _   n   u   m   ]   ,       n   u   m   _   c   l   a   s   s   e   s   ,       d   t   y   p   e   =   t   o   r   c   h   .   i   n   t   3   2   ,       d   e   v   i   c   e   =   d   e   v   i   c   e   )   
-                   i   n   p   u   t   _   q   u   e   r   y   _   b   b   o   x       =       t   o   r   c   h   .   z   e   r   o   s   (   [   b   a   t   c   h   _   s   i   z   e   ,       m   a   x   _   g   t   _   n   u   m   ,       4   ]   ,       d   e   v   i   c   e   =   d   e   v   i   c   e   )   
-                   p   a   d   _   g   t   _   m   a   s   k       =       t   o   r   c   h   .   z   e   r   o   s   (   [   b   a   t   c   h   _   s   i   z   e   ,       m   a   x   _   g   t   _   n   u   m   ]   ,       d   t   y   p   e   =   t   o   r   c   h   .   b   o   o   l   ,       d   e   v   i   c   e   =   d   e   v   i   c   e   )   
-   
-                   f   o   r       i       i   n       r   a   n   g   e   (   b   a   t   c   h   _   s   
