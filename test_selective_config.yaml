@@ -1,0 +1,32 @@
+# Test configuration to verify selective testing without OpenCode
+repository_path: "/Users/antonellaschiavoni/antonella-projects/python_programming_challenges_with_unit_tests"
+problem_description: "Fix the implementation of register_payment"
+
+# Disable OpenCode for testing
+opencode:
+  enabled: false
+  use_sessions: false
+  enable_shell_execution: false
+
+# Simple agent configuration
+agents:
+  - agent_id: "test_fixer"
+    model_name: "claude-3-5-sonnet-20241022"
+    temperature: 0.7
+    specialized_role: "general"
+
+# Enable selective testing (this is what we want to test)
+testing:
+  test_command: "python -m pytest"
+  enable_selective_testing: true
+  test_timeout_seconds: 60
+
+# Evaluation settings
+evaluation:
+  method: "elo_tournament"
+  model_name: "claude-3-5-sonnet-20241022"
+
+# Logging
+logging:
+  level: "INFO"
+  console_output: true

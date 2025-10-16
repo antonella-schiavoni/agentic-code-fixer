@@ -81,7 +81,12 @@ class OpenCodeClient:
         self.config = config
         self.client = httpx.AsyncClient(
             base_url=config.server_url,
-            timeout=httpx.Timeout(config.session_timeout_seconds),
+            timeout=httpx.Timeout(
+                connect=30.0,  # Connection timeout
+                read=config.session_timeout_seconds,  # Read timeout
+                write=30.0,  # Write timeout
+                pool=30.0   # Pool timeout
+            ),
         )
         self.active_sessions: dict[str, OpenCodeSession] = {}
 
@@ -130,14 +135,14 @@ class OpenCodeClient:
 
         try:
             logger.debug(f"Creating session with payload: {payload}")
-            logger.debug(f"Sending POST to: {self.client.base_url}/session")
+            logger.debug(f"Sending POST to: {self.config.server_url}/session")
             response = await self.client.post("/session", json=payload)
             logger.debug(f"Session creation response status: {response.status_code}")
             logger.debug(f"Session creation response text: {response.text}")
             response.raise_for_status()
         except Exception as e:
             logger.error(
-                f"Failed to create session. URL: {self.client.base_url}/session"
+                f"Failed to create session. URL: {self.config.server_url}/session"
             )
             logger.error(f"Payload: {payload}")
             logger.error(f"Error: {e}")
@@ -228,11 +233,10 @@ class OpenCodeClient:
         Returns:
             List of match objects with path, lines, line numbers, and submatches.
         """
-        endpoint = f"{self.base_url}/find"
         params = {"pattern": pattern}
 
         try:
-            response = await self.session.get(endpoint, params=params)
+            response = await self.client.get("/find", params=params)
             response.raise_for_status()
 
             results = response.json()
@@ -255,11 +259,10 @@ class OpenCodeClient:
         Returns:
             List of symbol objects with location and definition information.
         """
-        endpoint = f"{self.base_url}/find/symbol"
         params = {"query": query}
 
         try:
-            response = await self.session.get(endpoint, params=params)
+            response = await self.client.get("/find/symbol", params=params)
             response.raise_for_status()
 
             results = response.json()

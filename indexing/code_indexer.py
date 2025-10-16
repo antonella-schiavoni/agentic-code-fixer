@@ -15,9 +15,15 @@ from __future__ import annotations
 import ast
 import logging
 import re
+import urllib.parse
 from pathlib import Path
 
 from core.config import OpenCodeConfig, VectorDBConfig
+from core.pattern_utils import (
+    create_function_search_patterns,
+    sanitize_function_name_fallback,
+    escape_pattern_for_opencode
+)
 from core.types import CodeContext
 from indexing.vector_store import VectorStore
 
@@ -434,6 +440,8 @@ class CodeIndexer:
     ) -> list[CodeContext]:
         """Find code contexts related to the base contexts using OpenCode file analysis."""
         related_contexts = []
+        max_search_attempts = 3  # Prevent infinite loops
+        search_attempt = 0
 
         for context in base_contexts:
             try:
@@ -445,6 +453,16 @@ class CodeIndexer:
 
                 # Use OpenCode to find usages of these functions
                 for func_name in function_names[:5]:  # Limit to avoid too many requests
+                    search_attempt += 1
+                    
+                    # Prevent infinite loops by limiting total search attempts
+                    if search_attempt > max_search_attempts:
+                        logger.warning(
+                            f"Exceeded maximum search attempts ({max_search_attempts}), "
+                            f"stopping related context search"
+                        )
+                        break
+                    
                     related_files = await self._find_function_usages(func_name)
 
                     for file_path in related_files[:3]:  # Limit files per function
@@ -455,7 +473,7 @@ class CodeIndexer:
                             if related_context:
                                 related_contexts.append(related_context)
 
-                if len(related_contexts) >= max_related_files:
+                if len(related_contexts) >= max_related_files or search_attempt > max_search_attempts:
                     break
 
             except Exception as e:
@@ -471,17 +489,13 @@ class CodeIndexer:
             return []
 
         try:
-            # Use OpenCode's find endpoint to search for function usage patterns
-            search_patterns = [
-                f"{function_name}(",  # Function calls
-                f"from .* import.*{function_name}",  # Import statements
-                f"import.*{function_name}",  # Direct imports
-            ]
-
+            # Use properly escaped search patterns for OpenCode's find endpoint
+            search_patterns = create_function_search_patterns(function_name)
+            
             found_files = set()
             for pattern in search_patterns:
                 try:
-                    # Use OpenCode's file search API
+                    # Use OpenCode's file search API with escaped pattern
                     results = await self.opencode_client.find_in_files(pattern)
 
                     # Extract file paths from results
@@ -491,6 +505,20 @@ class CodeIndexer:
 
                 except Exception as e:
                     logger.debug(f"Search pattern '{pattern}' failed: {e}")
+            
+            # If no results found with standard patterns, try fallback
+            if not found_files:
+                try:
+                    fallback_pattern = sanitize_function_name_fallback(function_name)
+                    logger.debug(f"Trying fallback pattern for '{function_name}': {fallback_pattern}")
+                    
+                    results = await self.opencode_client.find_in_files(fallback_pattern)
+                    for result in results:
+                        if isinstance(result, dict) and "path" in result:
+                            found_files.add(result["path"])
+                            
+                except Exception as e:
+                    logger.debug(f"Fallback pattern search failed for '{function_name}': {e}")
 
             return list(found_files)[:10]  # Limit results
 
@@ -608,10 +636,33 @@ class CodeIndexer:
                 :3
             ]:  # Limit to avoid too many requests
                 try:
-                    # Find files that reference this function
-                    usage_results = await self.opencode_client.find_in_files(
-                        f"{func_name}("
-                    )
+                    # Find files that reference this function using escaped patterns
+                    search_patterns = create_function_search_patterns(func_name)
+                    
+                    usage_files = set()
+                    for pattern in search_patterns:
+                        try:
+                            results = await self.opencode_client.find_in_files(pattern)
+                            usage_files.update(
+                                result["path"] for result in results 
+                                if isinstance(result, dict) and "path" in result
+                            )
+                        except Exception as e:
+                            logger.debug(f"Search pattern '{pattern}' failed for {func_name}: {e}")
+                    
+                    # If no results, try fallback
+                    if not usage_files:
+                        try:
+                            fallback_pattern = sanitize_function_name_fallback(func_name)
+                            results = await self.opencode_client.find_in_files(fallback_pattern)
+                            usage_files.update(
+                                result["path"] for result in results 
+                                if isinstance(result, dict) and "path" in result
+                            )
+                        except Exception as e:
+                            logger.debug(f"Fallback pattern search failed for {func_name}: {e}")
+                    
+                    usage_results = [{"path": path} for path in usage_files]
 
                     for result in usage_results[:5]:  # Limit results
                         if isinstance(result, dict) and "path" in result:
@@ -634,9 +685,12 @@ class CodeIndexer:
             # Also look for files that import from this file
             if context.language == "python":
                 module_name = file_path.stem  # filename without extension
-                import_results = await self.opencode_client.find_in_files(
-                    f"from.*{module_name}.*import|import.*{module_name}"
-                )
+                # Create import patterns with escaped module name but preserve regex operators
+                escaped_module_name = re.escape(module_name)  # Escape just the module name for regex
+                import_pattern = f"from.*{escaped_module_name}.*import|import.*{escaped_module_name}"
+                # Now URL encode the entire pattern for OpenCode API
+                encoded_pattern = urllib.parse.quote(import_pattern, safe='')
+                import_results = await self.opencode_client.find_in_files(encoded_pattern)
 
                 for result in import_results[:5]:
                     if isinstance(result, dict) and "path" in result:

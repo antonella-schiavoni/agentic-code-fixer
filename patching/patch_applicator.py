@@ -22,6 +22,7 @@ from core.config import OpenCodeConfig, TestingConfig
 from core.path_utils import normalize_patch_file_path
 from core.types import PatchCandidate, TestResult
 from opencode_client import OpenCodeClient
+from testing.test_selector import TestSelector
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,11 @@ class PatchApplicator:
     """
 
     def __init__(
-        self, config: TestingConfig, opencode_config: OpenCodeConfig | None = None
+        self, 
+        config: TestingConfig, 
+        opencode_config: OpenCodeConfig | None = None,
+        repository_path: str | Path | None = None,
+        enable_selective_testing: bool = True
     ) -> None:
         """Initialize the patch applicator with testing and validation configuration.
 
@@ -57,17 +62,32 @@ class PatchApplicator:
             config: TestingConfig object containing test commands, timeout settings,
                 and regression detection parameters.
             opencode_config: Optional OpenCode configuration for shell execution.
+            repository_path: Path to repository root (for selective testing)
+            enable_selective_testing: Whether to enable selective test execution
         """
         self.config = config
         self.opencode_config = opencode_config
         self.opencode_client = None
+        self.repository_path = Path(repository_path) if repository_path else None
+        self.enable_selective_testing = enable_selective_testing
+        
+        # Initialize test selector for intelligent test selection
+        self.test_selector = None
+        if self.enable_selective_testing and self.repository_path:
+            try:
+                self.test_selector = TestSelector(self.repository_path)
+                logger.info("Initialized selective test execution")
+            except Exception as e:
+                logger.warning(f"Failed to initialize test selector: {e}")
+                self.test_selector = None
 
         if opencode_config and opencode_config.enable_shell_execution:
             self.opencode_client = OpenCodeClient(opencode_config)
 
         logger.info(
-            "Initialized patch applicator with OpenCode integration: %s",
+            "Initialized patch applicator with OpenCode integration: %s, selective testing: %s",
             bool(self.opencode_client),
+            bool(self.test_selector),
         )
 
     def apply_patch(
@@ -157,22 +177,26 @@ class PatchApplicator:
                 return False
             
             # Determine operation type based on line indices relative to file length
-            is_pure_append = line_start_0idx >= len(lines)  # Pure append at EOF
+            # For solution patches, we need to be more flexible about extending files
+            is_exact_append = line_start_0idx == len(lines)  # Append exactly at EOF
+            is_solution_extension = line_start_0idx > len(lines)  # Solution extends beyond current file
             is_file_extension = line_start_0idx < len(lines) and line_end_0idx >= len(lines)  # Replace + extend
             is_replacement = line_start_0idx < len(lines) and line_end_0idx < len(lines)  # Pure replacement
             
             # Validate line ranges for different operation types
-            if is_pure_append:
-                # For pure append operations, allow line_start to be exactly at file end
-                if line_start_0idx > len(lines):
-                    logger.error(
-                        f"Invalid append operation: line_start {patch.line_start} (0-indexed) "
-                        f"cannot skip lines. File has {len(lines)} lines, max append position is {len(lines)}"
-                    )
-                    return False
+            if is_exact_append:
+                # Traditional append at exactly EOF - this is always valid
                 logger.info(
-                    f"Pure append operation detected: adding {line_end_0idx - line_start_0idx + 1} "
+                    f"Exact append operation detected: adding {line_end_0idx - line_start_0idx + 1} "
                     f"lines starting at position {line_start_0idx} (at EOF)"
+                )
+            elif is_solution_extension:
+                # Solution patches can extend beyond current file - allow this for complete solutions
+                # This handles cases where AI agents generate complete function implementations
+                # that are longer than the current stub/partial implementations
+                logger.info(
+                    f"Solution extension operation detected: extending file from {len(lines)} lines "
+                    f"to implement solution at lines {line_start_0idx}-{line_end_0idx}"
                 )
             elif is_file_extension:
                 # For file extension operations, allow line_end to exceed file length
@@ -211,9 +235,15 @@ class PatchApplicator:
                 patch_lines = [line + "\n" for line in patch_lines]
 
             # Apply the patch using 0-indexed line numbers based on operation type
-            if is_pure_append:
-                # For pure append operations, add lines at the end
+            if is_exact_append:
+                # For exact append operations, add lines at the end
                 new_lines = lines + patch_lines
+            elif is_solution_extension:
+                # For solution extensions, we need to pad the file with empty lines up to the patch start
+                # This handles cases where AI agents generate solutions that extend beyond current content
+                lines_to_add = line_start_0idx - len(lines)
+                padding_lines = ["\n"] * lines_to_add  # Add empty lines to fill the gap
+                new_lines = lines + padding_lines + patch_lines
             elif is_file_extension or is_replacement:
                 # For both file extension and replacement operations, use the same logic:
                 # - Replace existing lines from line_start_0idx to min(line_end_0idx, len(lines)-1)
@@ -257,9 +287,13 @@ class PatchApplicator:
                 logger.debug(f"{marker}{i}: {repr(verification_lines[i])}")
             
             # Check that the patched lines match expected content based on operation type
-            if is_pure_append:
-                # For pure append operations, check the lines at the end of the file
+            if is_exact_append:
+                # For exact append operations, check the lines at the end of the file
                 actual_patched_lines = verification_lines[-len(patch_lines):]
+            elif is_solution_extension:
+                # For solution extensions, check the lines starting from the specified position
+                # The patch should be at the exact line_start position after padding
+                actual_patched_lines = verification_lines[line_start_0idx:line_start_0idx + len(patch_lines)]
             elif is_file_extension or is_replacement:
                 # For both file extension and replacement operations, check from line_start position
                 # The patch_lines should now be at the specified position regardless of operation type
@@ -319,16 +353,22 @@ class PatchApplicator:
         self,
         repo_path: str | Path,
         patch_id: str | None = None,
+        patches_for_selection: list[PatchCandidate] | None = None,
+        force_all_tests: bool = False
     ) -> TestResult:
         """Execute the configured test suite and return detailed results.
 
         Runs the complete test pipeline including pre-test setup, main test execution,
         and post-test cleanup. Captures comprehensive output and timing information
         for analysis and reporting purposes.
+        
+        Supports selective test execution based on patch analysis to improve performance.
 
         Args:
             repo_path: Path to the repository where tests should be executed.
             patch_id: Optional identifier of the applied patch for tracking purposes.
+            patches_for_selection: Optional patches to analyze for selective testing
+            force_all_tests: Force running all tests (ignores selective testing)
 
         Returns:
             TestResult object containing exit codes, output, timing, and parsed
@@ -336,18 +376,22 @@ class PatchApplicator:
         """
         repo_path = Path(repo_path)
         start_time = datetime.now()
+        manifest_path = None
 
         try:
             # Run pre-test commands
             for cmd in self.config.pre_test_commands:
                 self._run_command(cmd, repo_path)
 
+            # Determine test command (with potential selective testing)
+            test_command = self._prepare_test_command(
+                repo_path, patches_for_selection, force_all_tests
+            )
+            manifest_path = getattr(self, '_current_manifest_path', None)
+
             # Run main test command with proper isolation
-            # Force pytest to use the current directory as rootdir to prevent auto-discovery
-            # of parent directory configuration files
-            isolated_command = self._isolate_test_command(self.config.test_command, repo_path)
             result = self._run_command(
-                isolated_command,
+                test_command,
                 repo_path,
                 timeout=self.config.test_timeout_seconds,
             )
@@ -395,23 +439,35 @@ class PatchApplicator:
                 passed=False,
                 failed_tests=[],
             )
+            
+        finally:
+            # Clean up test manifest if created
+            if manifest_path and self.test_selector:
+                try:
+                    self.test_selector.cleanup_manifest(manifest_path)
+                except Exception as e:
+                    logger.debug(f"Failed to cleanup test manifest: {e}")
 
     def apply_and_test_patch(
         self,
         patch: PatchCandidate,
         repo_path: str | Path,
         baseline_test_result: TestResult | None = None,
+        force_all_tests: bool = False
     ) -> tuple[bool, TestResult]:
         """Apply a patch and immediately run tests to validate the changes.
 
         Combines patch application and testing into a single atomic operation,
         providing comprehensive validation of the patch effectiveness. Includes
         regression detection when baseline test results are provided.
+        
+        Supports selective test execution based on patch analysis.
 
         Args:
             patch: PatchCandidate to apply and test.
             repo_path: Path to the target repository.
             baseline_test_result: Optional baseline test results for regression detection.
+            force_all_tests: Force running all tests (ignores selective testing)
 
         Returns:
             Tuple containing:
@@ -434,8 +490,13 @@ class PatchApplicator:
                 failed_tests=[],
             )
 
-        # Run tests
-        test_result = self.run_tests(repo_path, patch.id)
+        # Run tests with selective testing enabled
+        test_result = self.run_tests(
+            repo_path, 
+            patch.id, 
+            patches_for_selection=[patch], 
+            force_all_tests=force_all_tests
+        )
 
         # Check for regressions if baseline is provided
         if baseline_test_result and self.config.fail_on_regression:
@@ -588,6 +649,11 @@ class PatchApplicator:
             Exception: If command execution fails for other reasons.
         """
         try:
+            # Debug: Log detailed test command execution information
+            logger.info(f"🧪 EXECUTING TEST COMMAND: {command}")
+            logger.info(f"🧪 WORKING DIRECTORY: {cwd}")
+            logger.info(f"🧪 TIMEOUT: {timeout}s")
+            
             result = subprocess.run(
                 command,
                 shell=True,
@@ -597,17 +663,24 @@ class PatchApplicator:
                 timeout=timeout,
             )
 
-            logger.debug(
-                f"Command '{command}' completed with exit code {result.returncode}"
+            logger.info(
+                f"🧪 TEST COMMAND COMPLETED: '{command}' -> exit code {result.returncode}"
             )
+            
+            # Debug: Log test output for better debugging
+            if result.stdout:
+                logger.info(f"🧪 STDOUT: {result.stdout[:500]}{'...' if len(result.stdout) > 500 else ''}")
+            if result.stderr:
+                logger.info(f"🧪 STDERR: {result.stderr[:500]}{'...' if len(result.stderr) > 500 else ''}")
+            
             return result
 
         except subprocess.TimeoutExpired:
-            logger.error(f"Command '{command}' timed out after {timeout} seconds")
+            logger.error(f"🧪 TEST COMMAND TIMEOUT: '{command}' timed out after {timeout} seconds")
             raise
 
         except Exception as e:
-            logger.error(f"Failed to run command '{command}': {e}")
+            logger.error(f"🧪 TEST COMMAND ERROR: Failed to run '{command}': {e}")
             raise
 
     def _parse_failed_tests(self, output: str) -> list[str]:
@@ -710,3 +783,49 @@ class PatchApplicator:
             )
         
         return command
+        
+    def _prepare_test_command(
+        self, 
+        repo_path: Path, 
+        patches_for_selection: list[PatchCandidate] | None = None,
+        force_all_tests: bool = False
+    ) -> str:
+        """Prepare test command with selective testing if applicable.
+        
+        Args:
+            repo_path: Path to the repository
+            patches_for_selection: Optional patches to analyze for selective testing  
+            force_all_tests: Force running all tests (ignores selective testing)
+            
+        Returns:
+            Test command string to execute
+        """
+        base_command = self.config.test_command
+        
+        # Skip selective testing if disabled or forced to run all tests
+        if not self.test_selector or force_all_tests or not patches_for_selection:
+            return self._isolate_test_command(base_command, repo_path)
+            
+        try:
+            # Select relevant tests based on patches
+            selected_tests = self.test_selector.select_tests_for_patches(patches_for_selection)
+            
+            # If no specific tests selected, fall back to all tests
+            if not selected_tests:
+                logger.info("No selective tests found, running all tests")
+                return self._isolate_test_command(base_command, repo_path)
+                
+            # Create test manifest
+            manifest_path = self.test_selector.create_test_manifest(selected_tests)
+            self._current_manifest_path = manifest_path  # Store for cleanup
+            
+            # Modify command to use manifest file
+            # pytest supports reading test files from a file using @filename syntax
+            selective_command = f"{base_command} @{manifest_path}"
+            
+            return self._isolate_test_command(selective_command, repo_path)
+            
+        except Exception as e:
+            logger.warning(f"Failed to prepare selective test command: {e}")
+            logger.info("Falling back to running all tests")
+            return self._isolate_test_command(base_command, repo_path)

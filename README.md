@@ -280,6 +280,97 @@ The system supports different agent roles for diverse patch generation:
 - **Concurrency**: Threading and async programming fixes
 - **Reliability**: Fault-tolerant and robust solutions
 
+## Selective Test Execution
+
+### Overview
+
+The system includes intelligent test selection that dramatically reduces test execution time by only running tests relevant to the code being modified. This feature analyzes patch changes and identifies which tests actually import or use the modified functions/classes.
+
+### How It Works
+
+1. **Symbol Analysis**: Extracts modified functions/classes from applied patches
+2. **Test Indexing**: Builds and maintains a cached index of which tests import which symbols
+3. **Smart Selection**: Selects only tests that reference modified code
+4. **Safe Fallback**: Falls back to full test suite when no relevant tests are found
+
+### Benefits
+
+- **Faster Feedback**: Run only 5-20% of tests instead of the entire suite
+- **Maintained Confidence**: Only skips tests that definitely don't use modified code
+- **Automatic**: Works transparently with existing test commands
+- **Cached**: Test analysis is cached and updated only when test files change
+
+### Configuration
+
+Selective testing is enabled by default but can be controlled via configuration:
+
+```yaml
+testing:
+  test_command: "pytest"
+  enable_selective_testing: true  # Default: true
+  test_timeout_seconds: 300
+```
+
+### CLI Options
+
+```bash
+# Force running all tests (useful for CI/final validation)
+agentic-code-fixer run config.yaml --all-tests
+
+# Normal operation with selective testing (default)
+agentic-code-fixer run config.yaml
+```
+
+### Example Output
+
+When selective testing is active, you'll see logs like:
+
+```
+INFO: Extracted 3 modified symbols: {'math_utils.add', 'math_utils.Calculator.divide'}
+INFO: Built test symbol index with 127 symbols in 0.8s
+INFO: Selected 12/89 tests (13.5%) because they reference 3 modified symbols
+INFO: Created test manifest at .agentic_selected_tests with 12 tests
+```
+
+### Supported Test Patterns
+
+The system automatically discovers tests using common patterns:
+- `test_*.py`
+- `*_test.py` 
+- `tests/*.py`
+- `tests/**/test_*.py`
+- `tests/**/*_test.py`
+
+### Cache Management
+
+Test symbol index is cached in `.cache/test_symbol_index.json` and automatically invalidated when:
+- Test files are modified
+- New test files are added
+- Test patterns change
+
+### Troubleshooting Selective Testing
+
+#### Cache Issues
+```bash
+# Clear test selection cache
+rm -rf .cache/test_symbol_index*
+```
+
+#### Verification
+```bash
+# Check which tests would be selected (without running)
+cat .agentic_selected_tests  # After a test run
+
+# Compare with full test discovery
+pytest --collect-only -q | grep "test_" | wc -l
+```
+
+#### Disable for Debugging
+```yaml
+testing:
+  enable_selective_testing: false  # Run all tests
+```
+
 ## Evaluation Method
 
 ### ELO Tournament

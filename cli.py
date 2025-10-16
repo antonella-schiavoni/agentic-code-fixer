@@ -45,6 +45,11 @@ def run(
         "--exclude-patterns",
         help="Additional file patterns to exclude during indexing (e.g., '*.log', 'temp_*')",
     ),
+    all_tests: bool = typer.Option(
+        False,
+        "--all-tests",
+        help="Force running all tests instead of selective testing (useful for CI)",
+    ),
 ) -> None:
     """Execute a complete automated code fixing experiment.
 
@@ -64,6 +69,11 @@ def run(
 
         # Set the problem description from command line input
         config.problem_description = input
+        
+        # Override selective testing setting if --all-tests flag is provided
+        if all_tests:
+            config.testing.enable_selective_testing = False
+            console.print("[blue]Selective testing disabled - will run all tests[/blue]")
 
         # Add context files if provided (note: with target_files removed, context files are now indexed automatically through comprehensive repository scanning)
         if context:

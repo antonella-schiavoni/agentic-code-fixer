@@ -86,7 +86,12 @@ class AgenticCodeFixer:
             )
         
         self.patch_evaluator = PatchEvaluator(config.evaluation, config.opencode)
-        self.patch_applicator = PatchApplicator(config.testing, config.opencode)
+        self.patch_applicator = PatchApplicator(
+            config=config.testing, 
+            opencode_config=config.opencode,
+            repository_path=config.repository_path,
+            enable_selective_testing=config.testing.enable_selective_testing
+        )
         self.elo_ranker = EloRanker(
             k_factor=config.evaluation.elo_k_factor, initial_rating=1200.0
         )
@@ -461,7 +466,10 @@ class AgenticCodeFixer:
 
             # Run tests on the complete solution
             test_result = self.patch_applicator.run_tests(
-                repo_path=test_env, patch_id=f"solution_{solution_key}"
+                repo_path=test_env, 
+                patch_id=f"solution_{solution_key}",
+                patches_for_selection=solution_patches,
+                force_all_tests=False  # Allow selective testing for final validation
             )
 
             # Update status for all patches based on test results
@@ -588,7 +596,10 @@ class AgenticCodeFixer:
                     
                     try:
                         test_result = self.patch_applicator.run_tests(
-                            repo_path=shared_test_env, patch_id=f"solution_{solution_key}"
+                            repo_path=shared_test_env, 
+                            patch_id=f"solution_{solution_key}",
+                            patches_for_selection=solution_patches,
+                            force_all_tests=False  # Allow selective testing during validation
                         )
                         logger.info(f"🧪 VALIDATION: Test result for solution {solution_key}: passed={test_result.passed}, exit_code={test_result.exit_code}")
                     finally:
@@ -797,7 +808,9 @@ class AgenticCodeFixer:
         self.experiment_logger.log_info("Running baseline tests...")
 
         baseline_result = self.patch_applicator.run_tests(
-            repo_path=self.config.repository_path
+            repo_path=self.config.repository_path,
+            patches_for_selection=None,
+            force_all_tests=True  # Always run all tests for baseline
         )
 
         self.experiment_logger.log_test_result(baseline_result, "baseline")

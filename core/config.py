@@ -137,6 +137,7 @@ class TestingConfig(BaseModel):
     post_test_commands: list[str] = Field(default_factory=list)
     required_coverage: float | None = None
     fail_on_regression: bool = True
+    enable_selective_testing: bool = True
 
 
 class LoggingConfig(BaseModel):

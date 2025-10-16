@@ -77,7 +77,7 @@ opencode:
   max_parallel_sessions: 2
   session_timeout_seconds: 300
   server_host: "127.0.0.1"
-  server_port: 60181
+  server_port: 51645
   enable_shell_execution: false
   enable_code_analysis: true
   enable_direct_file_ops: true  # Enable direct file operations for faster execution
